@@ -14,8 +14,9 @@ def make_uncorrelated_nz_maps(
     nside: int,
     mean_z: float,
     sigma0: float,
-    mean_scatter: float = 0.0,
+    mean_scatter: float = 0.05,
     width_scatter: float = 0.0,
+    noise_level: float = 0.0,
     seed: int = 42,
     n_plot: int = 50,
     chunk_size: int = 10000,
@@ -66,6 +67,16 @@ def make_uncorrelated_nz_maps(
         norms[norms == 0] = 1e-9 # avoid division by zero
         profiles /= norms[:, None]
 
+        # Add Shot Noise / Uncorrelated Noise
+        # This adds noise to each pixel's N(z) independently
+        if noise_level > 0:
+             noise = noise_level * np.random.randn(*profiles.shape)
+             profiles += noise
+             # Ensure positivity? Or allow fluctuations?
+             # Real histograms are positive, but delta_n can be negative. 
+             # Let's clip to be safe for n(z) interpretation.
+             profiles = np.maximum(0, profiles)
+
         nbar_fine_sum += np.sum(profiles, axis=0)
         sigma_inv_local_sum += np.sum(np.trapezoid(profiles ** 2, z_fine, axis=1))
 
@@ -90,6 +101,45 @@ def make_uncorrelated_nz_maps(
     return n_maps, nbar, z_fine, profiles_subset, nbar_fine, sigma_inv_local_mean
 
 
+def plot_selection_wtheta(result, theta_arcmin, output_dir):
+    plt.figure(figsize=(8, 6))
+    
+    # Choose representative z-bins where global n(z) is significant
+    # Indices where nbar is above a threshold
+    nbar_peak = np.max(result.nbar)
+    significant_indices = np.where(result.nbar > 0.05 * nbar_peak)[0]
+    
+    if len(significant_indices) > 5:
+        # Pick 5 equidistant indices from significant ones
+        indices = np.linspace(significant_indices[0], significant_indices[-1], 5, dtype=int)
+        # Ensure peak is included if possible
+        peak_idx = np.argmax(result.nbar)
+        if peak_idx not in indices:
+             # Find closest in indices and replace
+             closest = np.argmin(np.abs(indices - peak_idx))
+             indices[closest] = peak_idx
+        indices = np.sort(np.unique(indices))
+    else:
+        indices = significant_indices
+
+    for i in indices:
+        z_val = result.z_mid[i]
+        # result.w_selection is <delta N^2> (count fluctuation correlation)
+        # Divide by dz^2 to get density correlation <delta n^2>
+        w_density = result.w_selection[i] / (result.dz[i] ** 2)
+        
+        plt.plot(theta_arcmin, w_density, linewidth=2, label=f"z={z_val:.2f}")
+
+    plt.xlabel(r"$\theta$ [arcmin]")
+    plt.ylabel(r"$\langle \delta n(z, \theta) \delta n(z, 0) \rangle$")
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.grid(True, alpha=0.3, which="both")
+    plt.legend()
+    plt.title(r"Spatial Variation of $n(z)$ Density")
+    plt.savefig(os.path.join(output_dir, "selection_wtheta_z.png"))
+    plt.close()
+
 def main() -> None:
     nside = 128
     ell_max = 2048
@@ -100,7 +150,8 @@ def main() -> None:
     mean_z = 0.5
     sigma0 = 0.2
     mean_scatter = 0.04 
-    width_scatter = 0.15 # Add width scatter
+    width_scatter = 0.15 
+    noise_level = 0.5 # Add DOMINANT shot noise
 
     cosmo = ccl.Cosmology(
         Omega_c=0.25,
@@ -117,6 +168,7 @@ def main() -> None:
         sigma0,
         mean_scatter=mean_scatter,
         width_scatter=width_scatter,
+        noise_level=noise_level,
         seed=42,
     )
 
@@ -181,6 +233,13 @@ def main() -> None:
     print(f"Measured Clust. Enhanc (theta_min): {1.0 + result.delta_w[0] / result.w_model[0]:.6f}")
     print(f"xi_m-weighted Predicted Factor: {1.0 + dw_estim / w_estim:.6f}")
 
+    # Diagnostic: Check decoherence at theta_min
+    peak_idx = np.argmax(result.nbar)
+    w_sel_0 = result.w_selection[peak_idx, 0] / (result.dz[peak_idx]**2)
+    # Re-calculate var_peak properly from maps
+    var_peak = np.mean((n_maps[peak_idx] - nbar[peak_idx])**2)
+    print(f"Decoherence Factor (z={z_edges[peak_idx]:.2f}): w_sys(theta_min) / var_sys = {w_sel_0 / var_peak:.4f}")
+
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
@@ -240,6 +299,8 @@ def main() -> None:
     plt.title(r"Model vs Direct CCL")
     plt.savefig(os.path.join(output_dir, "w_model_vs_ccl.png"))
     plt.close()
+
+    plot_selection_wtheta(result, theta_arcmin, output_dir)
 
     fig_comp, (ax_top, ax_bot) = plt.subplots(
         2, 1, figsize=(8, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}

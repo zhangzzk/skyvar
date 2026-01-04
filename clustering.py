@@ -51,6 +51,7 @@ class ClusteringEnhancement:
         self.ell_min = int(ell_min)
         if self.ell_min < 0 or self.ell_min >= self.ell_max:
             raise ValueError("Require 0 <= ell_min < ell_max.")
+        self._cache_xi_m = {}  # Simple internal cache for xi_m per bin
 
     @staticmethod
     def _ccl_correlation_compat(
@@ -216,7 +217,14 @@ class ClusteringEnhancement:
         # Final dz calculation
         dz_bins = np.diff(z_edges)
         nz_bins = len(dz_bins)
+        
+        # Check cache
+        cache_key = (tuple(z_edges.tolist()), tuple(theta_deg.tolist()))
+        if cache_key in self._cache_xi_m:
+            return self._cache_xi_m[cache_key], z_mid, dz_bins
+
         xi_m = np.zeros((nz_bins, len(theta_deg)), dtype=float)
+        print(f"Computing {nz_bins} thin-shell matter correlations (CCL)...")
         for i in range(nz_bins):
             z_lo, z_hi = float(z_edges[i]), float(z_edges[i + 1])
             dz_cur = dz_bins[i]
@@ -225,16 +233,16 @@ class ClusteringEnhancement:
 
             if z_support is None:
                 zmin, zmax = float(z_edges[0]), float(z_edges[-1])
-                z_s = np.linspace(zmin, zmax, 2000, dtype=float)
+                z_s = np.linspace(zmin, zmax, 1000, dtype=float)
             else:
                 z_s = z_support
 
             W = np.zeros_like(z_s)
             in_bin = (z_s >= z_lo) & (z_s < z_hi) if i < nz_bins - 1 else (z_s >= z_lo) & (z_s <= z_hi)
             W[in_bin] = 1.0 / dz_cur
-
             xi_m[i, :] = self._xi_matter_shell(z_s, W, theta_deg, bias=bias)
-
+        
+        self._cache_xi_m[cache_key] = xi_m
         return xi_m, z_mid, dz_bins
 
     def compute_enhancement_from_maps(
@@ -292,6 +300,7 @@ class ClusteringEnhancement:
 
         w_selection: Optional[np.ndarray]
         if selection_mode == "wtheta":
+            print(f"Computing {nz} angular variations (anafast)...")
             w_selection_density = np.zeros((nz, len(theta_deg)), dtype=float)
             for i in range(nz):
                 w_selection_density[i, :] = self.selection_wtheta_from_map(
