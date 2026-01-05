@@ -30,29 +30,73 @@ except ImportError:
 if config.CODE_SRC not in sys.path:
     sys.path.append(config.CODE_SRC)
 
-try:
-    from generate_mocksys import lon_diff, gaussian_2d, tiles as Tiles
-except ImportError as e:
-    print(f"Warning: Could not import generate_mocksys: {e}")
-
 # --- Core Functions (from generate_mocksys.py) ---
 
-def gaussian_2d_inv(x, y, cov=np.eye(2)*5, xmean=0, ymean=0, amp=1, shift=0):
-    '''
-    2-D Gaussian-like function with explicitly inverted covariance.
-    '''
+def lon_diff(lon1, lon2):
+    """Calculate the minor arc difference between two longitudes."""
+    dlon = lon1 - lon2
+    dlon[(dlon) > 180] -= 360
+    dlon[(dlon) < -180] += 360
+    return dlon
+
+def lon_sum(lon, dlon):
+    """Calculate the longitude by adding a difference to another longitude."""
+    lon = np.atleast_1d(lon)
+    dlon = np.atleast_1d(dlon)
+    aux_sign = np.zeros((lon + dlon).shape)
+    aux_sign[(lon+dlon < 360) * (lon+dlon > 0)] = 0
+    aux_sign[lon+dlon > 360] = -1
+    aux_sign[lon+dlon < 0] = 1
+    return lon + dlon + 360 * aux_sign
+
+def gaussian_2d(x, y, cov=np.eye(2)*5, xmean=0, ymean=0, amp=1, shift=0):
+    """2-D Gaussian-like function."""
     dx = x - xmean
     dy = y - ymean
     dxdy = np.vstack([dx, dy])
-    chi2 = np.sum(dxdy * (np.linalg.inv(cov) @ dxdy), axis=0)
+    chi2 = np.sum(dxdy * (cov @ dxdy), axis=0)
     return np.exp(-chi2/2) * amp + shift
 
-# Note: Using gaussian_2d from generate_mocksys if available, 
-# otherwise use local implementation.
-if 'gaussian_2d' not in locals():
-    def gaussian_2d(x, y, cov=np.eye(2)*5, xmean=0, ymean=0, amp=1, shift=0):
-        return gaussian_2d_inv(x, y, cov, xmean, ymean, amp, shift)
+class Tiles:
+    """Class that defines a group of tiles in the sky."""
+    def __init__(self, start_lon, start_lat, dx, dy, nlon, nlat):
+        self.n_tiles = nlon * nlat
+        lonind = np.arange(nlon)
+        latind = np.arange(nlat)
+        lonind, latind = np.meshgrid(lonind, latind)
 
+        lonind = lonind.reshape(-1)
+        latind = latind.reshape(-1)
+        center_lats = start_lat + latind * dy
+        center_lons = lon_sum(start_lon, dx * lonind / np.cos(np.radians(center_lats)))
+        self.tile_centers = np.vstack([center_lons, center_lats]).T
+        self.corner_lon_w = lon_diff(self.tile_centers.T[0], dx/np.cos(np.radians(self.tile_centers.T[1]))/2)
+        self.corner_lon_e = lon_sum(self.tile_centers.T[0], dx/np.cos(np.radians(self.tile_centers.T[1]))/2)
+        self.corner_lat_n = self.tile_centers.T[1]+dy/2
+        self.corner_lat_s = self.tile_centers.T[1]-dy/2
+        self.dlats = self.corner_lat_n - self.corner_lat_s
+        self.dlons = lon_diff(self.corner_lon_e, self.corner_lon_w)
+        
+    def get_tileind_fast(self, lon, lat):
+        """Vectorized version: find which tile each (lon, lat) belongs to."""
+        lon = np.asarray(lon)
+        lat = np.asarray(lat)
+        tile_inds = np.full(lon.shape, -1, dtype=int)
+
+        lon_min = (self.tile_centers[:, 0] - self.dlons / 2 + 360) % 360
+        lon_max = (self.tile_centers[:, 0] + self.dlons / 2 + 360) % 360
+        lat_min = self.tile_centers[:, 1] - self.dlats / 2
+        lat_max = self.tile_centers[:, 1] + self.dlats / 2
+
+        lon = (lon + 360) % 360
+
+        for i, (lmin, lmax, bmin, bmax) in tqdm(enumerate(zip(lon_min, lon_max, lat_min, lat_max))):
+            in_lon = (lon >= lmin) & (lon <= lmax) if lmin <= lmax else ((lon >= lmin) | (lon <= lmax))
+            in_lat = (lat >= bmin) & (lat <= bmax)
+            mask = in_lon & in_lat & (tile_inds == -1)
+            tile_inds[mask] = i
+
+        return tile_inds
 # --- Systematic Classes ---
 
 class SystematicBase:
@@ -137,13 +181,11 @@ class GalacticSystematic(SystematicBase):
         return Ar
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser(description="Generate mock systematic maps.")
-    parser.add_argument("--nside", type=int, default=config.SIM_SETTINGS['sys_nside'], help="HEALPix nside.")
-    parser.add_argument("--output", type=str, default=None, help="Output FITS path.")
-    args = parser.parse_args()
+    # Ensure output directories exist
+    os.makedirs(os.path.join(config.BASE_DIR, "data"), exist_ok=True)
+    os.makedirs(os.path.join(config.BASE_DIR, "output"), exist_ok=True)
 
-    nside = args.nside
+    nside = config.SIM_SETTINGS['sys_nside']
     npix = hp.nside2npix(nside)
     theta, phi = hp.pix2ang(nside, np.arange(npix))
     ra_pix, dec_pix = np.degrees(phi), np.degrees(0.5 * np.pi - theta)
@@ -151,7 +193,7 @@ def main():
     # Footprint from config
     RA_MIN, RA_MAX = config.SYSTEMATICS_CONFIG['footprint']['ra_range']
     DEC_MIN, DEC_MAX = config.SYSTEMATICS_CONFIG['footprint']['dec_range']
-    mask_footprint = (ra_pix > RA_MIN) & (ra_pix < RA_MAX) & (dec_pix > DEC_MIN) & (dec_pix < DEC_MAX)
+    # mask_footprint = (ra_pix > RA_MIN) & (ra_pix < RA_MAX) & (dec_pix > DEC_MIN) & (dec_pix < DEC_MAX)
     
     # Initialize Tiles
     print("Initializing tiles...")
@@ -161,8 +203,9 @@ def main():
     nlat = int((DEC_MAX - DEC_MIN) / dy)
     test_tiles = Tiles(RA_MIN, DEC_MIN, dx, dy, nlon, nlat)
     
-    pix_tileind = np.full(npix, -1, dtype=int)
-    pix_tileind[mask_footprint] = test_tiles.get_tileind_fast(ra_pix[mask_footprint], dec_pix[mask_footprint])
+    # pix_tileind = np.full(npix, -1, dtype=int)
+    pix_tileind = test_tiles.get_tileind_fast(ra_pix, dec_pix)
+    mask_footprint = pix_tileind != -1
 
     # Systematics
     sys_noise = PixelNoiseSystematic(test_tiles, config.SYSTEMATICS_CONFIG['noise'])
@@ -174,7 +217,7 @@ def main():
     pix_sys_psf = sys_psf(ra_pix, dec_pix, pix_tileind)
     pix_sys_galactic = sys_galactic(ra_pix, dec_pix)
 
-    output_path = args.output or config.PATHS['mock_sys_map']
+    output_path = config.PATHS['mock_sys_map']
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     print(f"Saving maps to {output_path}...")
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
@@ -182,9 +225,11 @@ def main():
     # Plotting
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
-    utils.plt_map(pix_sys_psf, nside, mask_footprint, label="PSF FWHM", save_path=os.path.join(output_dir, "sys_map_psf.png"))
-    utils.plt_map(pix_sys_noise, nside, mask_footprint, label="Pixel RMS", save_path=os.path.join(output_dir, "sys_map_noise.png"))
-    utils.plt_map(pix_sys_galactic, nside, mask_footprint, label="Extinction Ar", save_path=os.path.join(output_dir, "sys_map_galactic.png"))
+    
+    for map_data, label, name in zip([pix_sys_psf, pix_sys_noise, pix_sys_galactic], 
+                                     ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
+                                     ["psf", "noise", "galactic"]):
+        utils.plt_map(map_data, nside, mask_footprint, label=label, save_path=os.path.join(output_dir, f"sys_map_{name}.png"))
 
 if __name__ == "__main__":
     main()

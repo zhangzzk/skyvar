@@ -7,14 +7,14 @@ BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
 
 # --- 1. Global Simulation Settings ---
 SIM_SETTINGS = {
-    'sys_nside': 128,
-    'n_pop_sample': 50_000,
+    'sys_nside': 64,
+    'n_pop_sample': 200_000,
     'chunk_size': 10_000_000,
-    'n_jobs': 128,  # Parallel processing threads
+    'n_jobs': -1,  # Parallel processing threads
 }
 
 # --- 2. Paths & Directories ---
-BASE_DIR = '/home/z/Zekang.Zhang/spatial_variation/'
+BASE_DIR = '/home/z/Zekang.Zhang/nz_variation/'
 PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
 
 PATHS = {
@@ -50,6 +50,8 @@ ANALYSIS_SETTINGS = {
     'z_bins': 60,
     'tomo_bin_edges': [0.0, 0.5, 1.0, 1.5, 2.0],
     'smoothing_sigma_dz': 0.2,
+    'smooth_nz': False,
+    'load_preds': True,
 }
 
 # --- 6. Cosmology ---
@@ -76,26 +78,38 @@ SYSTEMATICS_CONFIG = {
         'ra_range': [140, 240],
         'dec_range': [-5, 5],
     },
+
     'tiles': {
         'size_deg': 1.0,
     },
+
     'noise': {
-        'mu0': 6.0,
-        'sigma_tile': 0.5,
-        'sigma_pix': 0.05
+    'mu0': 6.0,        # global mean pixel noise
+    'sigma_tile': 0.5, # tile-to-tile scatter
+    'sigma_pix': 0.05  # small pixel-level jitter
     },
+
     'psf': {
-        'mu0': 0.75,
-        'sigma_tile': 0.07,
-        'Abar': -0.08,
-        'sigma_A': 0.04,
-        'sigma_pix': 0.005,
-        'xmean_fluc': 0.15,
-        'ymean_fluc': 0.15,
-        'covxx_mean': 10,
-        'covyy_mean': 10,
-        'covxx_fluc': 2,
-        'covyy_fluc': 2,
-        'covxy_fluc': 4,
-    }
+    # global baseline (median seeing)
+    'mu0': 0.75,
+
+    # inter-tile fluctuations
+    'sigma_tile': 0.07,   # scatter in mean PSF across tiles
+
+    # amplitude distribution
+    'Abar': -0.08,        # mean intra-tile amplitude
+    'sigma_A': 0.04,      # scatter of amplitude across tiles
+
+    # small pixel-level noise
+    'sigma_pix': 0.005,
+
+    # Gaussian shape inside tiles
+    'xmean_fluc': 0.15,
+    'ymean_fluc': 0.15,
+    'covxx_mean': 10,
+    'covyy_mean': 10,
+    'covxx_fluc': 2,
+    'covyy_fluc': 2,
+    'covxy_fluc': 4,
+},
 }

@@ -8,7 +8,6 @@ from astropy.io import fits
 from joblib import Parallel, delayed
 from scipy.ndimage import gaussian_filter1d
 import xgboost as xgb
-import argparse
 
 try:
     from . import utils
@@ -288,7 +287,7 @@ def run_xgb_classification(fullset):
     return cla_cat
 
 
-def process_stats(sys_res, z, SEEN_idx):
+def process_stats(sys_res, z, SEEN_idx, smooth=False):
     """Auxiliary to package dndz results."""
     dndzs = sys_res.drop(["sum_num"], axis=1)
     if "total_input" in dndzs.index:
@@ -304,17 +303,24 @@ def process_stats(sys_res, z, SEEN_idx):
     dndz_in = sys_res.drop(["sum_num"], axis=1).loc["total_input"].to_numpy().astype(float)
     dndz_det = sys_res.drop(["sum_num"], axis=1).loc["total_detected"].to_numpy().astype(float)
 
-    print(f"Smoothing {dndzs.shape[0]} distributions...")
-    sigma_dz = config.ANALYSIS_SETTINGS['smoothing_sigma_dz']
-    sm_dndzs = smooth_nz_preserve_moments(z, dndzs, sigma_dz=sigma_dz)
-    sm_dndz_in = smooth_nz_preserve_moments(z, dndz_in, sigma_dz=sigma_dz)
-    sm_dndz_det = smooth_nz_preserve_moments(z, dndz_det, sigma_dz=sigma_dz)
+    if smooth:
+        print(f"Smoothing {dndzs.shape[0]} distributions...")
+        sigma_dz = config.ANALYSIS_SETTINGS['smoothing_sigma_dz']
+        sm_dndzs = smooth_nz_preserve_moments(z, dndzs, sigma_dz=sigma_dz)
+        sm_dndz_in = smooth_nz_preserve_moments(z, dndz_in, sigma_dz=sigma_dz)
+        sm_dndz_det = smooth_nz_preserve_moments(z, dndz_det, sigma_dz=sigma_dz)
     
-    return {
-        'z': z, 'dndzs': dndzs, 'dndz_in': dndz_in, 'dndz_det': dndz_det,
-        'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
-        'sm_dndzs': sm_dndzs, 'sm_dndz_in': sm_dndz_in, 'sm_dndz_det': sm_dndz_det
-    }
+        return {
+            'z': z, 'dndzs': dndzs, 'dndz_in': dndz_in, 'dndz_det': dndz_det,
+            'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
+            'sm_dndzs': sm_dndzs, 'sm_dndz_in': sm_dndz_in, 'sm_dndz_det': sm_dndz_det
+        }
+    else:
+        return {
+            'z': z, 'dndzs': dndzs, 'dndz_in': dndz_in, 'dndz_det': dndz_det,
+            'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
+            'sm_dndzs': dndzs, 'sm_dndz_in': dndz_in, 'sm_dndz_det': dndz_det
+        }
 
 
 def generate_summary_statistics(cla_cat, psf_hp_map, SEEN_idx, output_dir, tomo_bin_edges=None):
@@ -330,14 +336,14 @@ def generate_summary_statistics(cla_cat, psf_hp_map, SEEN_idx, output_dir, tomo_
     mean_p[SEEN_idx] = detection_rate
     
     utils.plt_map(mean_p, SYS_NSIDE, np.where(~np.isnan(psf_hp_map)), 
-            s=20, save_path=os.path.join(output_dir, "detection_rate_map.png"))
+            save_path=os.path.join(output_dir, "detection_rate_map.png"))
     
     z = np.linspace(0, config.ANALYSIS_SETTINGS['z_max'], config.ANALYSIS_SETTINGS['z_bins'])
     results = {}
     
     print("Calculating dN/dz for full sample...")
     sys_res = groupby_dndz(cla_cat, z, post_cut=None)
-    stats_full = process_stats(sys_res, z, SEEN_idx)
+    stats_full = process_stats(sys_res, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
     results['full'] = stats_full
     
     if tomo_bin_edges is not None:
@@ -347,23 +353,22 @@ def generate_summary_statistics(cla_cat, psf_hp_map, SEEN_idx, output_dir, tomo_
             w_col = f"tomo_p_{i}"
             cla_cat[w_col] = p_weights[:, i]
             sys_res_i = groupby_dndz(cla_cat, z, post_cut=None, weight_col=w_col)
-            results[f'tomo_{i}'] = process_stats(sys_res_i, z, SEEN_idx)
+            results[f'tomo_{i}'] = process_stats(sys_res_i, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
             del cla_cat[w_col]
             
     return results
 
 
-def save_diagnostic_plots(results, output_dir):
+def save_diagnostic_plots(results, output_dir, key='full'):
     """Generate and save distributions plots."""
-    for key, stats in results.items():
-        if key == 'full' or key.startswith('tomo_'):
-            plt.figure(figsize=(10, 6))
-            plt.plot(stats['z'], stats['dndz_det'], 'r-', label='Detected')
-            plt.plot(stats['z'], stats['dndz_in'], 'k--', label='Input')
-            plt.legend()
-            plt.title(f"Distribution: {key}")
-            plt.savefig(os.path.join(output_dir, f"pixel_nz_variations_{key}.png"))
-            plt.close()
+    stats = results[key]
+    plt.figure(figsize=(10, 6))
+    plt.plot(stats['z'], stats['dndz_det'], 'r-', label='Detected')
+    plt.plot(stats['z'], stats['dndz_in'], 'k--', label='Input')
+    plt.legend()
+    plt.title(f"Distribution: {key}")
+    plt.savefig(os.path.join(output_dir, f"pixel_nz_variations.png"))
+    plt.close()
 
 
 def plot_tomographic_bins(results, output_dir):
@@ -387,9 +392,10 @@ def plot_tomographic_bins(results, output_dir):
     plt.close()
 
 
-def save_fits_output(stats):
+def save_fits_output(stats, bin_idx=4):
     """Store final results in a multi-HDU FITS file."""
-    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE, N_POP_SAMPLE, None, 4)
+    # Using magbin=1 as default for consistency with notebook template
+    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE, N_POP_SAMPLE, 1, bin_idx)
     os.makedirs(os.path.dirname(output_fits_path), exist_ok=True)
     
     hdus = [
@@ -409,20 +415,41 @@ def save_fits_output(stats):
     print(f"Results saved to {output_fits_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Run selection simulation and analysis.")
-    parser.add_argument("--load_preds", action="store_true", help="Load existing predictions.")
-    args = parser.parse_args()
+def load_fits_output(bin_idx=4):
+    """Load results from a multi-HDU FITS file."""
+    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE, N_POP_SAMPLE, 1, bin_idx)
+    if not os.path.exists(output_fits_path):
+        print(f"Warning: FITS file {output_fits_path} not found.")
+        return None
+    
+    with fits.open(output_fits_path) as hdul:
+        stats = {
+            'z': hdul['Z'].data,
+            'dndzs': hdul['DNDZS'].data,
+            'dndz_in': hdul['DNDZ_IN'].data,
+            'dndz_det': hdul['DNDZ_DET'].data,
+            'frac': hdul['FRAC'].data[0],
+            'frac_pix': hdul['FRAC_PIX'].data,
+            'sm_dndzs': hdul['SM_DNDZS'].data,
+            'sm_dndz_in': hdul['SM_DNDZ_IN'].data,
+            'sm_dndz_det': hdul['SM_DNDZ_DET'].data,
+            'SEEN_idx': hdul['SEEN_IDX'].data
+        }
+    return stats
 
+
+def main():
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    if args.load_preds:
+    if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
         print(f"Loading existing predictions from {OUTPUT_PREDS}...")
         cla_cat = pd.read_feather(OUTPUT_PREDS)
         maps, SEEN_idx = load_system_maps()
         psf_hp_map = maps[0]
     else:
+        if not os.path.exists(OUTPUT_PREDS):
+             print(f"Predictions file {OUTPUT_PREDS} not found. Running simulation...")
         gal_cat, n_degree2 = load_and_filter_catalog()
         fullset, psf_hp_map, SEEN_idx = simulate_pixel_observables(gal_cat, n_degree2)
         cla_cat = run_xgb_classification(fullset)
@@ -432,7 +459,12 @@ def main():
     
     save_diagnostic_plots(results, output_dir)
     plot_tomographic_bins(results, output_dir)
-    save_fits_output(results['full'])
+    
+    # Save full sample and tomographic bins
+    save_fits_output(results['full'], bin_idx=4) # Using 4 for full as in notebook
+    for i in range(len(tomo_bin_edges) - 1):
+        if f'tomo_{i}' in results:
+            save_fits_output(results[f'tomo_{i}'], bin_idx=i)
 
     print("\n--- Enhancement Factor Results ---")
     for key, stats in results.items():

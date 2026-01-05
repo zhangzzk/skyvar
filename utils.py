@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import healpy as hp
 from matplotlib.colors import Normalize
 from scipy.stats import norm
+from scipy.spatial import KDTree
 
 try:
     from .config import PHOTOZ_PARAMS
@@ -51,8 +52,13 @@ def get_photoz_weights(df, bin_edges):
     
     return np.array(weights).T
 
-def plt_map(map_data, sys_nside, mask, label='value', s=2, save_path=None):
+def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None):
     """Plot HEALPix map for seen pixels."""
+    if s is None:
+        # Heuristic for adaptive dot size based on nside
+        s = 5*(256.0 / sys_nside)**2
+        s = np.clip(s, 0.1, 50)
+
     n_pix = hp.nside2npix(sys_nside)
     lon, lat = hp.pix2ang(sys_nside, np.arange(n_pix), lonlat=True)
 
@@ -60,7 +66,7 @@ def plt_map(map_data, sys_nside, mask, label='value', s=2, save_path=None):
     norm_scale = Normalize(vmin=vmin, vmax=vmax)
 
     plt.figure(figsize=(16, 2))
-    sc = plt.scatter(lon[mask], lat[mask], c=map_data[mask], s=s, cmap=plt.cm.coolwarm, norm=norm_scale)
+    sc = plt.scatter(lon[mask], lat[mask], c=map_data[mask], s=s, cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none')
     plt.colorbar(sc, label=label)
     plt.xlabel("RA [deg]")
     plt.ylabel("Dec [deg]")
@@ -78,3 +84,15 @@ def e1e2_to_q_phi(e1, e2):
     q = np.sqrt((1 - e) / (1 + e))
     phi = 0.5 * np.arctan2(e2, e1)
     return q, phi
+
+def kdt_neighbor_finder(pos1, pos2, r_min=0, r_max=10, k=30):
+    """Find neighbors using KDTree."""
+    kdt_in = KDTree(pos2)
+    dst, ind = kdt_in.query(pos1, k=k, distance_upper_bound=r_max, workers=-1)
+
+    found_idx = np.where((ind.reshape(-1) != pos2.shape[0]) & (dst.reshape(-1) > r_min))[0]
+    
+    idx1 = np.array([np.arange(0, pos1.shape[0]),] * k).T.reshape(-1)[found_idx]
+    idx2 = ind.reshape(-1)[found_idx]
+    
+    return idx1, idx2, dst.reshape(-1)[found_idx]

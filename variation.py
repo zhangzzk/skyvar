@@ -65,16 +65,25 @@ def main():
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Load Data/Setup using selection logic and config
-    print(f"Loading predictions from {config.PATHS['output_preds']}...")
-    cla_cat = pd.read_feather(config.PATHS['output_preds'])
-    maps, SEEN_idx = sel.load_system_maps()
-    psf_hp_map = maps[0]
-
+    # 1. Load Pre-calculated Statistics from FITS
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
-    results_stats = sel.generate_summary_statistics(
-        cla_cat, psf_hp_map, SEEN_idx, output_dir, tomo_bin_edges=tomo_bin_edges
-    )
+    results_stats = {}
+    
+    print("Loading pre-calculated statistics from FITS files...")
+    # Load full sample (bin_idx=4)
+    full_stats = sel.load_fits_output(bin_idx=4)
+    if full_stats is not None:
+        results_stats['full'] = full_stats
+        
+    # Load tomographic bins
+    for i in range(len(tomo_bin_edges) - 1):
+        tomo_stats = sel.load_fits_output(bin_idx=i)
+        if tomo_stats is not None:
+            results_stats[f'tomo_{i}'] = tomo_stats
+
+    if not results_stats:
+        print("Error: No statistics could be loaded. Please run selection.py first.")
+        return
 
     # 2. Setup Clustering Enhancement
     cosmo = ccl.Cosmology(
@@ -106,7 +115,7 @@ def main():
         
         # Geometric Factor (for comparison)
         geo_enhancement = utils.calculate_geometric_enhancement(
-            stats['z'], stats['dndzs'], stats['dndz_det'], frac_pix=stats['frac_pix']
+            stats['z'], stats['dndzs'], stats['dndz_det'], frac_pix=None,
         )
         all_geo_factors[key] = geo_enhancement
 

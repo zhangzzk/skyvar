@@ -6,7 +6,12 @@ import healpy as hp
 import matplotlib.pyplot as plt
 import pyccl as ccl
 
-from clustering_enhancement import ClusteringEnhancement
+try:
+    from . import utils
+    from .clustering import ClusteringEnhancement
+except ImportError:
+    import utils
+    from clustering import ClusteringEnhancement
 
 
 def make_uncorrelated_nz_maps(
@@ -218,9 +223,11 @@ def main() -> None:
     print(f"  Via variance integration: {dw_var:.6e}")
     print(f"  Ratio (wtheta/variance):  {dw_wtheta / dw_var:.4f}")
     
-    # Calculate Geometric factor
-    sigma_inv_global = np.trapezoid(nbar_fine ** 2, z_fine)
-    enhancement_factor = sigma_inv_local_mean / sigma_inv_global
+    # Calculate Geometric factor using binned results matches selection.py/variation.py logic
+    z_mid = result.z_mid
+    enhancement_factor = utils.calculate_geometric_enhancement(
+        z_mid, n_maps.T, nbar
+    )
 
     # Diagnostic: xi_m weighted enhancement
     xi0 = result.xi_m[:, 0]
