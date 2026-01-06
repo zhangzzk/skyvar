@@ -142,7 +142,7 @@ def plot_selection_wtheta(result, theta_arcmin, output_dir):
     plt.grid(True, alpha=0.3, which="both")
     plt.legend()
     plt.title(r"Spatial Variation of $n(z)$ Density")
-    plt.savefig(os.path.join(output_dir, "selection_wtheta_z.png"))
+    plt.savefig(os.path.join(output_dir, "selection_wtheta_z_toy.png"))
     plt.close()
 
 def main() -> None:
@@ -156,7 +156,7 @@ def main() -> None:
     sigma0 = 0.2
     mean_scatter = 0.04 
     width_scatter = 0.15 
-    noise_level = 0.5 # Add DOMINANT shot noise
+    noise_level = 0.02 # Add DOMINANT shot noise
 
     cosmo = ccl.Cosmology(
         Omega_c=0.25,
@@ -190,7 +190,6 @@ def main() -> None:
         nbar=nbar,
         z=z_edges,
         theta_deg=theta_deg,
-        nbar_z=(z_fine, nbar_fine),
         selection_mode="wtheta",
         nside=nside,
         seen_idx=seen_idx,
@@ -209,7 +208,6 @@ def main() -> None:
         nbar=nbar,
         z=z_edges,
         theta_deg=theta_deg,
-        nbar_z=(z_fine, nbar_fine),
         selection_mode="variance",
         nside=nside,
         seen_idx=seen_idx,
@@ -229,21 +227,25 @@ def main() -> None:
         z_mid, n_maps.T, nbar
     )
 
-    # Diagnostic: xi_m weighted enhancement
-    xi0 = result.xi_m[:, 0]
+    # Diagnostic: matrix weighted enhancement
+    # User's logic: w_tot = Sum_{i,j} n_i n_j w_mat_ij
+    # selection enhancement adds: Sum_i w_sel_i * w_mat_ii
+    weights = nbar * result.dz
+    w_mat0 = result.w_mat[:, :, 0]
+    w_estim = np.einsum("i,j,ij->", weights, weights, w_mat0) / (np.sum(weights)**2)
+    
     var_n_arr = np.mean((n_maps - nbar[:, None]) ** 2, axis=1)
-    dz_bins = result.dz
-    dw_estim = np.sum(var_n_arr * (dz_bins**2) * xi0)
-    w_estim = np.sum((nbar**2) * (dz_bins**2) * xi0)
+    w_sel_density = var_n_arr * (result.dz**2)
+    xi_diag0 = np.diagonal(w_mat0)
+    dw_estim = np.sum(w_sel_density * xi_diag0)
     
     print(f"Geometric Enhancement Factor: {enhancement_factor:.6f}")
     print(f"Measured Clust. Enhanc (theta_min): {1.0 + result.delta_w[0] / result.w_model[0]:.6f}")
-    print(f"xi_m-weighted Predicted Factor: {1.0 + dw_estim / w_estim:.6f}")
+    print(f"Binned Predicted Factor (theta_min): {1.0 + dw_estim / w_estim:.6f}")
 
     # Diagnostic: Check decoherence at theta_min
     peak_idx = np.argmax(result.nbar)
     w_sel_0 = result.w_selection[peak_idx, 0] / (result.dz[peak_idx]**2)
-    # Re-calculate var_peak properly from maps
     var_peak = np.mean((n_maps[peak_idx] - nbar[peak_idx])**2)
     print(f"Decoherence Factor (z={z_edges[peak_idx]:.2f}): w_sys(theta_min) / var_sys = {w_sel_0 / var_peak:.4f}")
 
@@ -260,7 +262,7 @@ def main() -> None:
     plt.ylabel("n(z)")
     plt.title(f"n(z) Variations (mean_scatter={mean_scatter})")
     plt.legend()
-    plt.savefig(os.path.join(output_dir, "nz_distribution_uncorrelated.png"))
+    plt.savefig(os.path.join(output_dir, "nz_distribution_toy.png"))
     plt.close()
 
     # plt.figure(figsize=(7, 5))
@@ -276,7 +278,11 @@ def main() -> None:
     # plt.savefig(os.path.join(output_dir, "delta_w.png"))
     # plt.close()
 
-    ell = np.arange(lmax_map + 1, dtype=int)
+    theta_arcmin = 60.0 * result.theta_deg
+    plt.figure(figsize=(7, 5))
+    plt.plot(theta_arcmin, theta_arcmin * result.w_model, "k--", linewidth=2, label=r"$w_{\rm model}$ (binned)")
+    
+    # We can still check the direct CCL comparison if we calculate it here
     dndz_global = nbar_fine / np.trapezoid(nbar_fine, z_fine)
     gtracer = ccl.NumberCountsTracer(
         cosmo,
@@ -284,8 +290,9 @@ def main() -> None:
         dndz=(z_fine, dndz_global),
         bias=(z_fine, np.ones_like(z_fine)),
     )
+    ell = np.arange(lmax_map + 1, dtype=int)
     cell = ccl.angular_cl(cosmo, gtracer, gtracer, ell)
-    w_total = ccl.correlation(
+    w_direct = ccl.correlation(
         cosmo,
         ell=ell,
         C_ell=cell,
@@ -293,18 +300,15 @@ def main() -> None:
         type="NN",
         method="fftlog",
     )
-
-    theta_arcmin = 60.0 * result.theta_deg
-    plt.figure(figsize=(7, 5))
-    plt.plot(theta_arcmin, theta_arcmin * result.w_model, "k--", linewidth=2, label=r"$w_{\rm model}$ (binned)")
-    plt.plot(theta_arcmin, theta_arcmin * w_total, "g-", linewidth=2, label=r"$w_{\rm total}$ (direct CCL)")
+    plt.plot(theta_arcmin, theta_arcmin * w_direct, "g-", linewidth=2, label=r"$w_{\rm total}$ (direct CCL)")
+    
     plt.xlabel(r"$\theta$ [arcmin]")
     plt.ylabel(r"$\theta \cdot w(\theta)$ [arcmin]")
     plt.xscale("log")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.title(r"Model vs Direct CCL")
-    plt.savefig(os.path.join(output_dir, "w_model_vs_ccl.png"))
+    plt.savefig(os.path.join(output_dir, "w_model_vs_ccl_toy.png"))
     plt.close()
 
     plot_selection_wtheta(result, theta_arcmin, output_dir)
@@ -342,7 +346,7 @@ def main() -> None:
     ax_bot.legend(fontsize=8)
 
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "w_comparison.png"))
+    plt.savefig(os.path.join(output_dir, "w_comparison_toy.png"))
     plt.close()
 
 

@@ -52,12 +52,12 @@ def get_photoz_weights(df, bin_edges):
     
     return np.array(weights).T
 
-def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None):
+def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None, ax=None):
     """Plot HEALPix map for seen pixels."""
     if s is None:
         # Heuristic for adaptive dot size based on nside
-        s = 5*(256.0 / sys_nside)**2
-        s = np.clip(s, 0.1, 50)
+        s = 12*(256.0 / sys_nside)**2
+        s = np.clip(s, 0.1, 100)
 
     n_pix = hp.nside2npix(sys_nside)
     lon, lat = hp.pix2ang(sys_nside, np.arange(n_pix), lonlat=True)
@@ -65,17 +65,26 @@ def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None):
     vmin, vmax = np.percentile(map_data[mask], [2, 98])
     norm_scale = Normalize(vmin=vmin, vmax=vmax)
 
-    plt.figure(figsize=(16, 2))
-    sc = plt.scatter(lon[mask], lat[mask], c=map_data[mask], s=s, cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none')
-    plt.colorbar(sc, label=label)
-    plt.xlabel("RA [deg]")
-    plt.ylabel("Dec [deg]")
-    plt.xlim(240, 140)
-    plt.ylim(-5, 5)
+    if ax is None:
+        plt.figure(figsize=(16, 2))
+        ax = plt.gca()
+        show_plot = True
+    else:
+        show_plot = False
+
+    sc = ax.scatter(lon[mask], lat[mask], c=map_data[mask], s=s, cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none')
+    plt.colorbar(sc, ax=ax, label=label)
+    ax.set_xlabel("RA [deg]")
+    ax.set_ylabel("Dec [deg]")
+    ax.set_xlim(240, 140)
+    ax.set_ylim(-5, 5)
+    
     if save_path:
         print(f"Saving map plot to {save_path}")
         plt.savefig(save_path)
-    plt.close()
+    
+    if show_plot:
+        plt.close()
 
 def e1e2_to_q_phi(e1, e2):
     """Convert distortion ellipticity to axis ratio q and position angle phi."""

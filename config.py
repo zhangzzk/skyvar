@@ -8,8 +8,8 @@ BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
 # --- 1. Global Simulation Settings ---
 SIM_SETTINGS = {
     'sys_nside': 64,
-    'n_pop_sample': 200_000,
-    'chunk_size': 10_000_000,
+    'n_pop_sample': 5_000_000,
+    'chunk_size': 50_000_000,
     'n_jobs': -1,  # Parallel processing threads
 }
 
@@ -19,16 +19,16 @@ PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
 
 PATHS = {
     'gal_cat': os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
-    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside']}.fits"),
+    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside']}_{SIM_SETTINGS['n_pop_sample']}.fits"),
     'model_json': "/home/z/Zekang.Zhang/optuna_study/models/classification_model_f24_rescaled_neighbor.json",
     'boundary_npy': "/home/z/Zekang.Zhang/optuna_study/models/train_boundary_f24_cla_neighbor.npy",
     'output_preds': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/mock_sys_preds_{SIM_SETTINGS['sys_nside']}_full_{SIM_SETTINGS['n_pop_sample']}.feather"),
-    'output_fits_template': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds/sys_{}_{}_nz_magbin{}/{}.fits"),
+    'output_fits_template': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds/sys_{}_{}_nz_bins/{}.fits"),
 }
 
 # --- 3. Observation Conditions (for Mock Simulation) ---
 OBS_CONDITIONS = {
-    'pixel_size': 0.214,
+    'pixel_size': 0.2,
     'zero_point': 30.0,
     'psf_fwhm_nominal': 0.6,
     'moffat_beta': 2.4,
@@ -39,18 +39,19 @@ OBS_CONDITIONS = {
 # --- 4. Photo-z Model (from math/clustering_enhance.md) ---
 PHOTOZ_PARAMS = {
     'b0': 0.0, 'b1': 0.0, 'bm': 0.0, 'bc': 0.0,
-    'sigma0': 0.05, 'alpha': 0.1, 
+    'sigma0': 0.1, 'alpha': 0.2, 
     'm_ref': 24.0, 
     'pixel_rms_ref': 6.0  # Reference noise level
 }
 
 # --- 5. Redshift Binning & Analysis ---
 ANALYSIS_SETTINGS = {
-    'z_max': 2.0,
+    'z_max': 3.,
     'z_bins': 60,
-    'tomo_bin_edges': [0.0, 0.5, 1.0, 1.5, 2.0],
-    'smoothing_sigma_dz': 0.2,
+    'tomo_bin_edges': [0.0, 0.3, 0.6, 0.9, 1.3, 1.8, 2.5],
+    'smoothing_sigma_dz': 0.05,
     'smooth_nz': False,
+    'preserve_l2': False,
     'load_preds': True,
 }
 
@@ -65,7 +66,7 @@ COSMO_PARAMS = {
 
 # --- 7. Clustering Analysis ---
 CLUSTERING_SETTINGS = {
-    'ell_max': 2048,
+    'ell_max': 3000,
     'ell_min': 2,
     'theta_min_deg': 0.01,
     'theta_max_deg': 10.0,

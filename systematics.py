@@ -180,6 +180,21 @@ class GalacticSystematic(SystematicBase):
         Ar = 2.285 * Ebv
         return Ar
 
+def plot_systematics_consolidated(maps, labels, nside, mask, output_path):
+    """Plot multiple maps in a single consolidated figure using utils.plt_map."""
+    n_maps = len(maps)
+    fig, axes = plt.subplots(n_maps, 1, figsize=(16, 2.5 * n_maps))
+    if n_maps == 1:
+        axes = [axes]
+
+    for i, (map_data, label) in enumerate(zip(maps, labels)):
+        utils.plt_map(map_data, nside, mask, label=label, ax=axes[i])
+
+    plt.tight_layout()
+    print(f"Saving consolidated systematics plot to {output_path}")
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
 def main():
     # Ensure output directories exist
     os.makedirs(os.path.join(config.BASE_DIR, "data"), exist_ok=True)
@@ -193,7 +208,6 @@ def main():
     # Footprint from config
     RA_MIN, RA_MAX = config.SYSTEMATICS_CONFIG['footprint']['ra_range']
     DEC_MIN, DEC_MAX = config.SYSTEMATICS_CONFIG['footprint']['dec_range']
-    # mask_footprint = (ra_pix > RA_MIN) & (ra_pix < RA_MAX) & (dec_pix > DEC_MIN) & (dec_pix < DEC_MAX)
     
     # Initialize Tiles
     print("Initializing tiles...")
@@ -203,7 +217,6 @@ def main():
     nlat = int((DEC_MAX - DEC_MIN) / dy)
     test_tiles = Tiles(RA_MIN, DEC_MIN, dx, dy, nlon, nlat)
     
-    # pix_tileind = np.full(npix, -1, dtype=int)
     pix_tileind = test_tiles.get_tileind_fast(ra_pix, dec_pix)
     mask_footprint = pix_tileind != -1
 
@@ -222,14 +235,13 @@ def main():
     print(f"Saving maps to {output_path}...")
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
 
-    # Plotting
-    output_dir = "output"
-    os.makedirs(output_dir, exist_ok=True)
-    
-    for map_data, label, name in zip([pix_sys_psf, pix_sys_noise, pix_sys_galactic], 
-                                     ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
-                                     ["psf", "noise", "galactic"]):
-        utils.plt_map(map_data, nside, mask_footprint, label=label, save_path=os.path.join(output_dir, f"sys_map_{name}.png"))
+    # Consolidated Plotting
+    plot_systematics_consolidated(
+        [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
+        ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
+        nside, mask_footprint, 
+        os.path.join("output", "sys_maps.png")
+    )
 
 if __name__ == "__main__":
     main()
