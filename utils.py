@@ -151,7 +151,7 @@ def weighted_quantile(x_in, w_in, q):
     
     return np.interp(q, cw, x_s)
 
-def get_redshift_bins(z_vals, weights=None, n_bins=None, q_lo=0.0001, q_hi=0.9999):
+def get_redshift_bins(z_vals, weights=None, n_bins=None, q_lo=0.001, q_hi=0.999):
     """
     Generate unified redshift bins based on data quantiles.
     Returns: (z_centers, z_edges)

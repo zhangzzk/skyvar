@@ -47,7 +47,7 @@ PHOTOZ_PARAMS = {
 
 # --- 5. Redshift Binning & Analysis ---
 ANALYSIS_SETTINGS = {
-    'z_bins': 60,
+    'z_bins': 200,
     'z_min': None,
     'z_max': None,
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],

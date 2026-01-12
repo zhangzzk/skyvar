@@ -1065,6 +1065,7 @@ def get_bin_details_from_cat(df, is_input_cat=False):
     # 1. Full Sample Bins
     z_f, edges_f = utils.get_redshift_bins(df[z_col], weights=weights_full)
     bin_details['full'] = (z_f, edges_f)
+    print(f"[Binning] Full: z=[{edges_f[0]:.4f}, {edges_f[-1]:.4f}], dz={(edges_f[1]-edges_f[0]):.4f}, n_bins={len(z_f)}")
     
     # 2. Tomographic Bins
     for i in range(len(tomo_bin_edges) - 1):
@@ -1072,8 +1073,10 @@ def get_bin_details_from_cat(df, is_input_cat=False):
         if np.sum(w_i) > 0:
             z_i, edges_i = utils.get_redshift_bins(df[z_col], weights=w_i)
             bin_details[f'tomo_{i}'] = (z_i, edges_i)
+            print(f"[Binning] Tomo_{i}: z=[{edges_i[0]:.4f}, {edges_i[-1]:.4f}], dz={(edges_i[1]-edges_i[0]):.4f}, n_bins={len(z_i)}")
         else:
             bin_details[f'tomo_{i}'] = (z_f, edges_f)
+            print(f"[Binning] Tomo_{i}: EMPTY (using full sample bins)")
             
     return bin_details
 
