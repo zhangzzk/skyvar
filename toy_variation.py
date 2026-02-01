@@ -11,11 +11,13 @@ try:
     from .clustering import ClusteringEnhancement
     from .selection import load_and_filter_catalog, smooth_nz_preserve_moments
     from . import config
+    from . import plotting as plt_nz
 except ImportError:
     import utils
     from clustering import ClusteringEnhancement
     from selection import load_and_filter_catalog, smooth_nz_preserve_moments
     import config
+    import plotting as plt_nz
 
 
 import numpy as np
@@ -141,135 +143,6 @@ def make_uncorrelated_nz_maps(
 
 
 
-def plot_selection_wtheta(result, theta_arcmin, output_dir):
-    plt.figure(figsize=(8, 6))
-    
-    # Choose representative z-bins where global n(z) is significant
-    # Indices where nbar is above a threshold
-    nbar_peak = np.max(result.nbar)
-    significant_indices = np.where(result.nbar > 0.05 * nbar_peak)[0]
-    
-    if len(significant_indices) > 5:
-        # Pick 5 equidistant indices from significant ones
-        indices = np.linspace(significant_indices[0], significant_indices[-1], 5, dtype=int)
-        # Ensure peak is included if possible
-        peak_idx = np.argmax(result.nbar)
-        if peak_idx not in indices:
-             # Find closest in indices and replace
-             closest = np.argmin(np.abs(indices - peak_idx))
-             indices[closest] = peak_idx
-        indices = np.sort(np.unique(indices))
-    else:
-        indices = significant_indices
-
-    for i in indices:
-        z_val = result.z_mid[i]
-        # result.w_selection is now (nz, nz, ntheta)
-        # We plot the auto-correlation for each bin i
-        w_density = result.w_selection[i, i] / (result.dz[i] ** 2)
-        
-        plt.plot(theta_arcmin, w_density, linewidth=2, label=f"z={z_val:.2f}")
-
-    plt.xlabel(r"$\theta$ [arcmin]")
-    plt.ylabel(r"$\langle \delta n(z, \theta) \delta n(z, 0) \rangle$")
-    plt.xscale("log")
-    plt.yscale("log")
-    plt.grid(True, alpha=0.3, which="both")
-    plt.legend()
-    plt.title(r"Spatial Variation of $n(z)$ Density")
-    plt.savefig(os.path.join(output_dir, "selection_wtheta_z_toy.png"))
-    plt.close()
-
-
-def plot_nz_variations(z_fine, profiles, nbar_fine, z_edges, mean_scatter, output_dir):
-    """Plot n(z) variations."""
-    plt.figure(figsize=(8, 6))
-    for prof in profiles:
-        plt.plot(z_fine, prof, color="gray", alpha=0.1)
-    plt.plot(z_fine, nbar_fine, "k-", linewidth=2, label=r"Global $\bar{n}(z)$")
-    plt.axvline(z_edges[0], color="r", linestyle=":", alpha=0.2)
-    plt.axvline(z_edges[-1], color="r", linestyle=":", alpha=0.2)
-    plt.xlabel("Redshift z")
-    plt.ylabel("n(z)")
-    plt.title(f"n(z) Variations (mean_scatter={mean_scatter})")
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, "nz_distribution_toy.png"))
-    plt.close()
-
-
-def plot_model_vs_ccl(result, cosmo, nbar_fine, z_fine, lmax_map, output_dir):
-    """Plot Model w(theta) vs direct CCL calculation."""
-    theta_arcmin = 60.0 * result.theta_deg
-    plt.figure(figsize=(7, 5))
-    plt.plot(theta_arcmin, theta_arcmin * result.w_model, "k--", linewidth=2, label=r"$w_{\rm model}$ (binned)")
-    
-    dndz_global = nbar_fine / np.trapezoid(nbar_fine, z_fine)
-    gtracer = ccl.NumberCountsTracer(
-        cosmo,
-        has_rsd=False,
-        dndz=(z_fine, dndz_global),
-        bias=(z_fine, np.ones_like(z_fine)),
-    )
-    ell = np.arange(lmax_map + 1, dtype=int)
-    cell = ccl.angular_cl(cosmo, gtracer, gtracer, ell)
-    w_direct = ccl.correlation(
-        cosmo,
-        ell=ell,
-        C_ell=cell,
-        theta=result.theta_deg,
-        type="NN",
-        method="fftlog",
-    )
-    plt.plot(theta_arcmin, theta_arcmin * w_direct, "g-", linewidth=2, label=r"$w_{\rm total}$ (direct CCL)")
-    
-    plt.xlabel(r"$\theta$ [arcmin]")
-    plt.ylabel(r"$\theta \cdot w(\theta)$ [arcmin]")
-    plt.xscale("log")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.title(r"Model vs Direct CCL")
-    plt.savefig(os.path.join(output_dir, "w_model_vs_ccl_toy.png"))
-    plt.close()
-
-
-def plot_clustering_comparison(result, result_var, enhancement_factor, z_std_ratio, output_dir):
-    """Plot comparison of clustering enhancement between different methods."""
-    theta_arcmin = 60.0 * result.theta_deg
-    fig_comp, (ax_top, ax_bot) = plt.subplots(
-        2, 1, figsize=(8, 8), sharex=True, gridspec_kw={"height_ratios": [3, 1]}
-    )
-
-    ax_top.plot(theta_arcmin, theta_arcmin * result.w_model, "k--", linewidth=2, label=r"$w_{\rm model}$")
-    ax_top.plot(theta_arcmin, theta_arcmin * result.w_true, "r-", linewidth=2, label=r"$w_{\rm true}$ (wtheta)")
-    ax_top.plot(theta_arcmin, theta_arcmin * result_var.w_true, "g:", linewidth=2, label=r"$w_{\rm true}$ (variance)")
-    ax_top.set_ylabel(r"$\theta \cdot w(\theta)$ [arcmin]")
-    ax_top.set_xscale("log")
-    ax_top.grid(True, alpha=0.3)
-    ax_top.legend(fontsize=12)
-    header_text = f"Geo Enhanc: {enhancement_factor:.4f} | Ratio(std_z): {z_std_ratio:.4f}\nClust. Enhanc: {result.delta_w[0]/result.w_model[0]:.4f}"
-    ax_top.set_title(header_text)
-
-    w_abs = np.abs(result.w_model)
-    thresh = 0.05 * np.nanmax(w_abs)
-    mask = w_abs > thresh
-    frac_diff = np.full_like(result.w_model, np.nan)
-    frac_diff[mask] = (result.w_true[mask] - result.w_model[mask]) / result.w_model[mask]
-    
-    frac_diff_var = np.full_like(result.w_model, np.nan)
-    frac_diff_var[mask] = (result_var.w_true[mask] - result.w_model[mask]) / result.w_model[mask]
-
-    ax_bot.plot(theta_arcmin, frac_diff, "r-", linewidth=1.5, label="wtheta")
-    ax_bot.plot(theta_arcmin, frac_diff_var, "g:", linewidth=1.5, label="variance")
-    ax_bot.set_xlim(theta_arcmin.min(), theta_arcmin.max())
-    ax_bot.set_ylabel(r"$\Delta w / w_{\rm model}$")
-    ax_bot.set_xlabel(r"$\theta$ [arcmin]")
-    ax_bot.set_xscale("log")
-    ax_bot.grid(True, alpha=0.3, which="both")
-    ax_bot.legend(fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "w_comparison_toy.png"))
-    plt.close()
 
 
 def main() -> None:
@@ -405,11 +278,11 @@ def main() -> None:
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    plot_nz_variations(z_fine, profiles, nbar_fine, z_edges, mean_scatter, output_dir)
-    plot_model_vs_ccl(result, cosmo, nbar_fine, z_fine, lmax_map, output_dir)
-    plot_selection_wtheta(result, 60.0 * result.theta_deg, output_dir)
-    plot_clustering_comparison(result, result_var, enhancement_factor, z_std_ratio, output_dir)
-    utils.plot_geo_factor_z(result.z_mid, n_maps_partial, result.nbar, output_dir, "geo_factor_z_toy.png", frac_pix=weights_partial)
+    plt_nz.plot_nz_variations(z_fine, profiles.T, nbar_fine, output_dir, title=f"n(z) Variations (mean_scatter={mean_scatter})", filename="nz_distribution_toy.png", z_edges=z_edges)
+    plt_nz.plot_model_vs_ccl(result, cosmo, nbar_fine, z_fine, output_dir, filename="w_model_vs_ccl_toy.png")
+    plt_nz.plot_selection_wtheta(result, 60.0 * result.theta_deg, output_dir, filename="selection_wtheta_z_toy.png")
+    plt_nz.plot_clustering_comparison(result, result_var, enhancement_factor, z_std_ratio, output_dir, filename="w_comparison_toy.png")
+    plt_nz.plot_geo_factor_z(result.z_mid, n_maps_partial, result.nbar, output_dir, "geo_factor_z_toy.png", frac_pix=weights_partial)
 
 
 if __name__ == "__main__":

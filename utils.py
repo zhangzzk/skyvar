@@ -2,114 +2,52 @@ import numpy as np
 import matplotlib.pyplot as plt
 import healpy as hp
 from matplotlib.colors import Normalize
-from scipy.stats import norm
 from scipy.spatial import KDTree
 import os
 
 try:
-    from .config import PHOTOZ_PARAMS
+    from .config import PHOTOZ_PARAMS, STATS_PARAMS
 except ImportError:
-    from config import PHOTOZ_PARAMS
+    from config import PHOTOZ_PARAMS, STATS_PARAMS
+
+def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
+    """
+    Calculate geometric widths and the geometric enhancement factor.
+    Returns: (geo_width_pix, geo_width_global, enhancement_factor)
+    """
+    if dndzs.ndim == 1:
+        dndzs = dndzs[None, :]
+        
+    # L2 norms (inverse geometric widths)
+    l2_pix = np.trapezoid(dndzs**2, z, axis=1)
+    l2_glob = np.trapezoid(dndz_glob**2, z)
+
+    geo_width_pix = np.where(l2_pix > 0, 1.0 / l2_pix, 0.0)
+    geo_width_global = 1.0 / l2_glob if l2_glob > 0 else 0.0
+
+    # correction for resolution bias
+    dz = np.mean(np.diff(z))
+    geo_width_pix = np.sqrt(geo_width_pix**2 + dz**2/12)
+    geo_width_global = np.sqrt(geo_width_global**2 + dz**2/12)
+    
+    if frac_pix is None:
+        mean_l2 = np.mean(l2_pix)
+    else:
+        mean_l2 = np.average(l2_pix, weights=frac_pix)
+    
+    enhancement = mean_l2 / l2_glob if l2_glob > 0 else 1.0
+    
+    # If input was 1D, return 1D array for geo_width_pix
+    if geo_width_pix.size == 1:
+        geo_width_pix = geo_width_pix[0]
+        
+    return geo_width_pix, geo_width_global, enhancement
 
 def calculate_geometric_enhancement(z, dndzs, dndz_glob, frac_pix=None):
-    """
-    Calculate the geometric enhancement factor.
-    """
-    local_inv_widths = np.array([np.trapezoid(nz**2, z) for nz in dndzs])
-    
-    if frac_pix is None:
-        mean_local = np.mean(local_inv_widths)
-    else:
-        mean_local = np.average(local_inv_widths, weights=frac_pix)
-        
-    global_inv_width = np.trapezoid(dndz_glob**2, z)
-    
-    if global_inv_width == 0:
-        return 1.0
-        
-    return mean_local / global_inv_width
+    """Deprecated: use calculate_geometric_stats instead."""
+    _, _, enhancement = calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix)
+    return enhancement
 
-def plot_geo_factor_z(z_mid, n_maps, nbar, output_dir, filename="geo_factor_z_toy.png", frac_pix=None):
-    """Plot geometric enhancement factor per redshift bin."""
-    plt.figure(figsize=(8, 6))
-    
-    if frac_pix is None:
-        mean_local_z = np.mean(n_maps**2, axis=1)
-    else:
-        # n_maps is (nz, npix)
-        mean_local_z = np.average(n_maps**2, weights=frac_pix, axis=1)
-    
-    global_z = nbar**2
-    total_ratio = np.trapezoid(mean_local_z, z_mid) / np.trapezoid(global_z, z_mid)
-    
-    plt.plot(z_mid, mean_local_z, 'b-o', markersize=4, label='$<n^2>$')
-    plt.plot(z_mid, global_z, 'r-o', markersize=4, label='$\\bar{n}^2$')
-    
-    plt.xlabel("Redshift z")
-    plt.ylabel("Geometric Factor")
-    plt.title("Geometric Enhancement: "+str(total_ratio))
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.savefig(os.path.join(output_dir, filename))
-    plt.close()
-
-def get_photoz_weights(df, bin_edges):
-    """
-    Calculate tomographic bin membership probabilities for each galaxy.
-    """
-    z_g = df['redshift_input_p'].values
-    m_g = df['r_input_p'].values
-    delta_m = 2.5 * np.log10(df['pixel_rms_input_p'] / PHOTOZ_PARAMS['pixel_rms_ref'])
-    
-    mu_g = z_g + PHOTOZ_PARAMS['b0'] + PHOTOZ_PARAMS['b1'] * z_g + \
-           PHOTOZ_PARAMS['bm'] * (m_g - PHOTOZ_PARAMS['m_ref'])
-    
-    sigma_g = PHOTOZ_PARAMS['sigma0'] * (1 + z_g) * \
-              (1 + PHOTOZ_PARAMS['alpha'] * (m_g + delta_m - PHOTOZ_PARAMS['m_ref']))
-    sigma_g = np.maximum(sigma_g, 0.01)
-    
-    weights = []
-    for i in range(len(bin_edges) - 1):
-        z_min, z_max = bin_edges[i], bin_edges[i+1]
-        p_i = norm.cdf(z_max, loc=mu_g, scale=sigma_g) - \
-              norm.cdf(z_min, loc=mu_g, scale=sigma_g)
-        weights.append(p_i)
-    
-    return np.array(weights).T
-
-def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None, ax=None):
-    """Plot HEALPix map for seen pixels."""
-    if s is None:
-        # Heuristic for adaptive dot size based on nside
-        s = 12*(256.0 / sys_nside)**2
-        s = np.clip(s, 0.1, 100)
-
-    n_pix = hp.nside2npix(sys_nside)
-    lon, lat = hp.pix2ang(sys_nside, np.arange(n_pix), lonlat=True)
-
-    vmin, vmax = np.percentile(map_data[mask], [2, 98])
-    norm_scale = Normalize(vmin=vmin, vmax=vmax)
-
-    if ax is None:
-        plt.figure(figsize=(16, 2))
-        ax = plt.gca()
-        show_plot = True
-    else:
-        show_plot = False
-
-    sc = ax.scatter(lon[mask], lat[mask], c=map_data[mask], s=s, cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none')
-    plt.colorbar(sc, ax=ax, label=label)
-    ax.set_xlabel("RA [deg]")
-    ax.set_ylabel("Dec [deg]")
-    ax.set_xlim(240, 140)
-    ax.set_ylim(-5, 5)
-    
-    if save_path:
-        print(f"Saving map plot to {save_path}")
-        plt.savefig(save_path)
-    
-    if show_plot:
-        plt.close()
 
 def e1e2_to_q_phi(e1, e2):
     """Convert distortion ellipticity to axis ratio q and position angle phi."""
@@ -192,3 +130,98 @@ def cal_sigz(dndz,z):
         var = np.trapezoid((z - mu[:,None])**2 * dndz, z, axis=1) / I
 
     return mu, np.sqrt(var)
+
+def compute_pixel_histograms(pix_idx, vals, weights, edges, n_pix=None):
+    """
+    Compute per-pixel normalized histograms.
+    Returns: (pixel_counts, normalized_hists)
+    """
+    vals = np.asarray(vals)
+    pix_idx = np.asarray(pix_idx)
+    weights = np.asarray(weights)
+    edges = np.asarray(edges)
+    
+    if n_pix is None:
+        n_pix = int(np.max(pix_idx) + 1)
+    
+    n_bins = len(edges) - 1
+    dz = np.diff(edges)
+    
+    bins = np.digitize(vals, edges) - 1
+    mask = (bins >= 0) & (bins < n_bins) & (pix_idx >= 0) & (pix_idx < n_pix)
+    
+    flat_idx = pix_idx[mask] * n_bins + bins[mask]
+    counts_flat = np.bincount(flat_idx, weights=weights[mask], minlength=n_pix * n_bins)
+    pixel_counts = counts_flat.reshape(n_pix, n_bins)
+    
+    sum_num = pixel_counts.sum(axis=1)
+    hists = np.zeros_like(pixel_counts)
+    active = sum_num > 0
+    hists[active] = pixel_counts[active] / (sum_num[active][:, None] * dz)
+    
+    return pixel_counts, hists
+
+def compute_redshift_stats(pix_idx, z_vals, weights, n_pix):
+    """
+    Compute global and per-pixel redshift standard deviation.
+    Returns: (std_z_all, std_z_pix, z_std_ratio)
+    """
+    z_vals = np.asarray(z_vals)
+    pix_idx = np.asarray(pix_idx)
+    weights = np.asarray(weights)
+    
+    sum_w = np.sum(weights)
+    if sum_w <= 0:
+        return 0.0, np.zeros(n_pix), 1.0
+        
+    mean_z_all = np.average(z_vals, weights=weights)
+    std_z_all = np.sqrt(np.average((z_vals - mean_z_all)**2, weights=weights))
+    
+    # Per-pixel sums
+    w_sum = np.bincount(pix_idx, weights=weights, minlength=n_pix)
+    wz_sum = np.bincount(pix_idx, weights=weights * z_vals, minlength=n_pix)
+    wz2_sum = np.bincount(pix_idx, weights=weights * z_vals**2, minlength=n_pix)
+    
+    min_count = STATS_PARAMS['min_count']
+    mask_v = w_sum > min_count
+    std_z_pix = np.zeros(n_pix)
+    
+    mean_z_pix = wz_sum[mask_v] / w_sum[mask_v]
+    var_z_pix = (wz2_sum[mask_v] / w_sum[mask_v]) - mean_z_pix**2
+    std_z_pix[mask_v] = np.sqrt(np.maximum(var_z_pix, 0))
+    
+    z_std_ratio = (1/std_z_pix[mask_v]).mean()/(1/std_z_all)
+    
+    return std_z_all, std_z_pix, z_std_ratio
+
+def compute_redshift_stats_from_sums(w_sum_pix, wz_sum_pix, wz2_sum_pix, 
+                                     total_w, total_wz, total_wz2):
+    """
+    Compute global and per-pixel redshift standard deviation using pre-calculated sums.
+    Returns: (std_z_all, std_z_pix, z_std_ratio)
+    """
+    n_pix = len(w_sum_pix)
+    if total_w <= 0:
+        return 0.0, np.zeros(n_pix), 1.0
+        
+    mean_z_all = total_wz / total_w
+    std_z_all = np.sqrt(np.maximum(total_wz2 / total_w - mean_z_all**2, 0))
+    
+    mask_v = w_sum_pix > 0
+    std_z_pix = np.zeros(n_pix)
+    
+    mean_z_pix = wz_sum_pix[mask_v] / w_sum_pix[mask_v]
+    var_z_pix = (wz2_sum_pix[mask_v] / w_sum_pix[mask_v]) - mean_z_pix**2
+    std_z_pix[mask_v] = np.sqrt(np.maximum(var_z_pix, 0))
+    
+    active_pix_std = std_z_pix[mask_v]
+    
+    # Use the inverse-std ratio formula: mean(1/sigma_i) / (1/sigma_global)
+    # Filter out zero std to avoid division by zero
+    valid_std = active_pix_std > 0
+    if np.any(valid_std):
+        z_std_ratio = np.mean(1.0 / active_pix_std[valid_std]) * std_z_all
+    else:
+        z_std_ratio = 1.0
+    
+    return std_z_all, std_z_pix, z_std_ratio

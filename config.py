@@ -8,10 +8,10 @@ BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
 # --- 1. Global Simulation Settings ---
 SIM_SETTINGS = {
     'sys_nside': 64,
-    'n_pop_sample': 100_000,
-    'chunk_size': 50_000_000,
+    'n_pop_sample': 5_000_000,
+    'chunk_size': 200_000_000,
     'n_jobs': -1,  # Parallel processing threads
-    'detection_threshold': 0.2,
+    'detection_threshold': 0.5,
 }
 
 # --- 2. Paths & Directories ---
@@ -20,7 +20,7 @@ PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
 
 PATHS = {
     'gal_cat': os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
-    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside']}_{SIM_SETTINGS['n_pop_sample']}.fits"),
+    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside']}.fits"),
     'model_json': "/home/z/Zekang.Zhang/optuna_study/models/classification_model_f24_rescaled_neighbor.json",
     'boundary_npy': "/home/z/Zekang.Zhang/optuna_study/models/train_boundary_f24_cla_neighbor.npy",
     'output_preds': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/mock_sys_preds_{SIM_SETTINGS['sys_nside']}_full_{SIM_SETTINGS['n_pop_sample']}.feather"),
@@ -28,6 +28,7 @@ PATHS = {
 }
 
 # --- 3. Observation Conditions (for Mock Simulation) ---
+# This does not really matter
 OBS_CONDITIONS = {
     'pixel_size': 0.2,
     'zero_point': 30.0,
@@ -39,22 +40,25 @@ OBS_CONDITIONS = {
 
 # --- 4. Photo-z Model (from math/clustering_enhance.md) ---
 PHOTOZ_PARAMS = {
-    'b0': 0.0, 'b1': 0.0, 'bm': 0.0, 'bc': 0.0,
-    'sigma0': 0.1, 'alpha': 0.5, 
-    'm_ref': 24.0, 
-    'pixel_rms_ref': 6.0  # Reference noise level
+    'sigma_int_ref': 0.0212 , 'sigma_pho_ref': 0.0376, 
+    'snr_ref': 35, 
+    'maglim0': 4, 'maglim1': 18, 'maglim2': 16, 'snr_min': 5,
 }
+
+STATS_PARAMS = {
+    'min_count': 100,
+}
+
 
 # --- 5. Redshift Binning & Analysis ---
 ANALYSIS_SETTINGS = {
-    'z_bins': 200,
-    'z_min': None,
-    'z_max': None,
+    'z_bins': 60,
+    'z_min': 0.0,
+    'z_max': 2.0,
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],
     'smoothing_sigma_dz': 0.1,
-    'smooth_nz': True,
+    'smooth_nz': False,
     'load_preds': False,
-    'post_det_snr_thresh': None,
 }
 
 # --- 6. Cosmology ---
@@ -94,7 +98,7 @@ SYSTEMATICS_CONFIG = {
 
     'psf': {
     # global baseline (median seeing)
-    'mu0': 0.75,
+    'mu0': 0.7,
 
     # inter-tile fluctuations
     'sigma_tile': 0.07,   # scatter in mean PSF across tiles
@@ -115,4 +119,17 @@ SYSTEMATICS_CONFIG = {
     'covyy_fluc': 2,
     'covxy_fluc': 4,
 },
+}
+
+# --- 9. Catalog Selection Settings ---
+CATALOG_SETTINGS = {
+    'mag_min': 0,
+    'mag_max': 25,
+    're_min': 0.01,
+    're_max': 5.0,
+    'ba_min': 0.05,
+    'ba_max': 1.0,
+    'sersic_min': 0.5,
+    'sersic_max': 6.0,
+    'cat_area': 5.97, # sq. degree
 }

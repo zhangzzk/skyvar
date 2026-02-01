@@ -170,26 +170,22 @@ class ClusteringEnhancement:
         z = np.asarray(z, dtype=float)
         theta_deg = np.asarray(theta_deg, dtype=float)
 
-        if nz is not None:
-            if len(z) == nz:
-                dz_val = np.diff(z)
-                z_edges = np.zeros(nz + 1)
-                if nz > 1:
-                    z_edges[1:-1] = z[:-1] + 0.5 * dz_val
-                    z_edges[0] = z[0] - 0.5 * dz_val[0]
-                    z_edges[-1] = z[-1] + 0.5 * dz_val[-1]
-                else:
-                    z_edges = np.array([z[0] - 0.05, z[0] + 0.05])
-                z_edges = np.maximum(0, z_edges)
-                z_mid = z
-            elif len(z) == nz + 1:
-                z_edges = z
-                z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
+        if len(z) == nz:
+            dz_val = np.diff(z)
+            z_edges = np.zeros(nz + 1)
+            if nz > 1:
+                z_edges[1:-1] = z[:-1] + 0.5 * dz_val
+                z_edges[0] = z[0] - 0.5 * dz_val[0]
+                z_edges[-1] = z[-1] + 0.5 * dz_val[-1]
             else:
-                raise ValueError(f"Redshift array length {len(z)} must be {nz} or {nz+1}")
-        else:
+                z_edges = np.array([z[0] - 0.05, z[0] + 0.05])
+            z_edges = np.maximum(0, z_edges)
+            z_mid = z
+        elif len(z) == nz + 1:
             z_edges = z
             z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
+        else:
+            raise ValueError(f"Redshift array length {len(z)} must be {nz} or {nz+1}")
 
         dz_bins = np.diff(z_edges)
         nz_bins = len(dz_bins)
@@ -201,7 +197,6 @@ class ClusteringEnhancement:
         print(f"Computing {nz_bins}x{nz_bins} shell correlations (CCL matrix)...")
         w_mat = np.zeros((nz_bins, nz_bins, len(theta_deg)), dtype=float)
         
-        # High resolution support for resolving shell kernels accurately
         zmin, zmax = float(z_edges[0]), float(z_edges[-1])
         z_s = np.linspace(zmin, zmax, 10000, dtype=float)
 
@@ -210,6 +205,8 @@ class ClusteringEnhancement:
             for i in range(nz_bins)
         ]
 
+        # computing the full cross-correlation, which takes long time
+        # TODO: optimize this later
         ell = np.arange(self.ell_max + 1, dtype=int)
         for i in range(nz_bins):
             for j in range(i, nz_bins):
@@ -270,24 +267,18 @@ class ClusteringEnhancement:
         if selection_mode not in ("wtheta", "variance"):
             raise ValueError("selection_mode must be 'wtheta' or 'variance'.")
 
-        w_selection: Optional[np.ndarray]
-        if selection_mode == "wtheta":
-            print(f"Computing {nz}x{nz} angular expansion terms (anafast matrix)...")
-            # delta_w_matrix has shape (nz, nz, ntheta)
-            delta_w_matrix = self.selection_wtheta_from_map(
-                n_maps, nbar, theta_deg, nside=nside, seen_idx=seen_idx
-            )
-            
-            # Apply integration weights dz_i * dz_j
-            dz_matrix = dz[:, None] * dz[None, :]
-            w_selection = delta_w_matrix * dz_matrix[:, :, None]
-            
-            # delta_w(theta) = Sum_{i,j} w_selection[i,j,theta] * w_mat[i,j,theta]
-            delta_w = np.einsum("ijk,ijk->k", w_selection, w_mat)
-        else:
-            xi_diagonal = np.diagonal(w_mat, axis1=0, axis2=1).T
-            delta_w = np.sum(var_n[:, None] * (dz[:, None] ** 2) * xi_diagonal, axis=0)
-            w_selection = None
+        print(f"Computing {nz}x{nz} angular expansion terms (anafast matrix)...")
+        # delta_w_matrix has shape (nz, nz, ntheta)
+        delta_w_matrix = self.selection_wtheta_from_map(
+            n_maps, nbar, theta_deg, nside=nside, seen_idx=seen_idx
+        )
+        
+        # Apply integration weights dz_i * dz_j
+        dz_matrix = dz[:, None] * dz[None, :]
+        w_selection = delta_w_matrix * dz_matrix[:, :, None]
+        
+        # delta_w(theta) = Sum_{i,j} w_selection[i,j,theta] * w_mat[i,j,theta]
+        delta_w = np.einsum("ijk,ijk->k", w_selection, w_mat)
         
         # Calculate w_model using full matrix shell summation (User version)
         weights = nbar * dz

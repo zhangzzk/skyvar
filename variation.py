@@ -9,117 +9,19 @@ try:
     from . import selection as sel
     from . import utils
     from . import config
+    from . import plotting as plt_nz
     from .clustering import ClusteringEnhancement
 except ImportError:
     import selection as sel
     import utils
     import config
+    import plotting as plt_nz
     from clustering import ClusteringEnhancement
 
 # Add enhance directory to path to ensure local imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 
-def plot_model_diagnostics(all_results, all_stats, output_dir):
-    """
-    Diagnostic plot comparing binned shell summation (User Version) vs direct CCL integral for w_model.
-    """
-    n_bins = len(all_results)
-    keys = list(all_results.keys())
-    
-    fig, axes = plt.subplots(1, n_bins, figsize=(5 * n_bins, 4), squeeze=False)
-        
-    for i, key in enumerate(keys):
-        res = all_results[key]
-        
-        # w_model already uses the user's matrix summation logic
-        ax = axes[0, i]
-        theta_arcmin = res.theta_deg * 60.0
-        
-        # Plot theta * w(theta)
-        y_binned = res.w_model * theta_arcmin
-        
-        ax.plot(theta_arcmin, y_binned, 'k--', lw=2, label=r'$w_{\rm model}$ (binned maps)')
-        
-        # We can still check the direct CCL comparison if we calculate it here
-        # (similar to user's 'w_total')
-        cosmo = ccl.Cosmology(
-            Omega_c=config.COSMO_PARAMS['Omega_c'], 
-            Omega_b=config.COSMO_PARAMS['Omega_b'], 
-            h=config.COSMO_PARAMS['h'], 
-            sigma8=config.COSMO_PARAMS['sigma8'], 
-            n_s=config.COSMO_PARAMS['n_s']
-        )
-        ell = np.arange(config.CLUSTERING_SETTINGS['ell_max'] + 1, dtype=int)
-        tracer = ccl.NumberCountsTracer(
-            cosmo,
-            has_rsd=False,
-            dndz=(res.z_mid, res.nbar), # Use the binned dndz centers
-            bias=(res.z_mid, np.ones_like(res.z_mid)),
-        )
-        cls = ccl.angular_cl(cosmo, tracer, tracer, ell)
-        if config.CLUSTERING_SETTINGS['ell_min'] > 0:
-            cls[: config.CLUSTERING_SETTINGS['ell_min']] = 0.0
-        w_direct = ccl.correlation(cosmo, ell=ell, C_ell=cls, theta=res.theta_deg)
-        
-        ax.plot(theta_arcmin, w_direct * theta_arcmin, 'g-', lw=2, label=r'$w_{\rm total}$ (direct CCL)')
-
-        ax.set_xscale('log')
-        ax.set_title(f"Model Diagnostic: {key}")
-        ax.set_xlabel(r"$\theta$ [arcmin]")
-        ax.set_ylabel(r"$\theta \cdot w(\theta)$")
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.legend()
-            
-    plt.tight_layout()
-    save_path = os.path.join(output_dir, "w_model_diagnostic.png")
-    plt.savefig(save_path)
-    print(f"Model diagnostic plot saved to {save_path}")
-    plt.close()
-
-
-def plot_all_comparisons(all_results, geometric_factors, output_dir):
-    """
-    Plot w_model vs w_true and their fractional difference for all bins in a multi-panel figure.
-    """
-    n_bins = len(all_results)
-    keys = list(all_results.keys())
-    
-    fig, axes = plt.subplots(2, n_bins, figsize=(5 * n_bins, 8), sharex=True)
-    if n_bins == 1:
-        axes = axes[:, np.newaxis]
-        
-    for i, key in enumerate(keys):
-        res = all_results[key]
-        geo_factor = geometric_factors[key]
-        theta_arcmin = res.theta_deg * 60.0
-        
-        # Upper panel: theta * w(theta)
-        ax0 = axes[0, i]
-        ax0.plot(theta_arcmin, theta_arcmin * res.w_model, 'k--', label='Model (global)')
-        ax0.plot(theta_arcmin, theta_arcmin * res.w_true, 'r-', label='True (local var)')
-        ax0.set_title(f"Bin: {key}\nGeo Enhancement: {geo_factor:.4f}")
-        ax0.set_ylabel(r"$\theta \cdot w(\theta)$ [arcmin]")
-        ax0.set_xscale('log')
-        if i == 0:
-            ax0.legend()
-        
-        # Lower panel: Fractional difference
-        ax1 = axes[1, i]
-        clustering_enhancement = res.w_true / res.w_model
-        ax1.semilogx(theta_arcmin, clustering_enhancement, 'b-')
-        ax1.axhline(geo_factor, color='g', linestyle='--', label='Geometric')
-        ax1.set_ylabel(r"$w_{true} / w_{model}$")
-        ax1.set_xlabel(r"$\theta$ [arcmin]")
-        if i == 0:
-            ax1.legend()
-            
-    plt.tight_layout()
-    save_path = os.path.join(output_dir, "w_comparison_all_bins.png")
-    plt.savefig(save_path)
-    print(f"Consolidated comparison plot saved to {save_path}")
-    plt.close()
 
 
 def main():
@@ -201,8 +103,8 @@ def main():
         print(f"[{key:10s}] Geometric: {geo_enhancement:.6f}, Clustering (theta_min): {clustering_enh_factor:.6f}")
 
     # 3. Consolidated Plotting
-    plot_all_comparisons(all_clustering_results, all_geo_factors, output_dir)
-    plot_model_diagnostics(all_clustering_results, results_stats, output_dir)
+    plt_nz.plot_all_comparisons(all_clustering_results, all_geo_factors, output_dir)
+    plt_nz.plot_model_diagnostics(all_clustering_results, results_stats, output_dir)
 
 
 if __name__ == "__main__":

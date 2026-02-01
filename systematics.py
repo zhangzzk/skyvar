@@ -22,9 +22,11 @@ from astropy.io import fits
 try:
     from . import utils
     from . import config
+    from . import plotting as plt_nz
 except ImportError:
     import utils
     import config
+    import plotting as plt_nz
 
 # Add paths to sys.path
 if config.CODE_SRC not in sys.path:
@@ -180,44 +182,6 @@ class GalacticSystematic(SystematicBase):
         Ar = 2.285 * Ebv
         return Ar
 
-def plot_systematics_consolidated(maps, labels, nside, mask, output_path):
-    """Plot multiple maps in a single consolidated figure using utils.plt_map."""
-    n_maps = len(maps)
-    fig, axes = plt.subplots(n_maps, 1, figsize=(16, 2.5 * n_maps))
-    if n_maps == 1:
-        axes = [axes]
-
-    for i, (map_data, label) in enumerate(zip(maps, labels)):
-        utils.plt_map(map_data, nside, mask, label=label, ax=axes[i])
-
-    plt.tight_layout()
-    print(f"Saving consolidated systematics plot to {output_path}")
-    plt.savefig(output_path, dpi=150)
-    plt.close()
-
-def plot_systematics_histograms(maps, labels, mask, output_path):
-    """Plot histograms of multiple maps in a single row."""
-    n_maps = len(maps)
-    fig, axes = plt.subplots(1, n_maps, figsize=(5 * n_maps, 4))
-    if n_maps == 1:
-        axes = [axes]
-
-    colors = ['royalblue', 'coral', 'mediumseagreen']
-    
-    for i, (map_data, label) in enumerate(zip(maps, labels)):
-        data = map_data[mask]
-        data = data[~np.isnan(data)] # Remove NaNs if any
-        
-        axes[i].hist(data, bins=50, color=colors[i % len(colors)], alpha=0.7, edgecolor='black', density=True)
-        axes[i].set_title(label)
-        axes[i].set_xlabel("Value")
-        axes[i].set_ylabel("Density")
-        axes[i].grid(True, linestyle='--', alpha=0.6)
-
-    plt.tight_layout()
-    print(f"Saving systematics histograms to {output_path}")
-    plt.savefig(output_path, dpi=150)
-    plt.close()
 
 def main():
     # Ensure output directories exist
@@ -260,7 +224,7 @@ def main():
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
 
     # Consolidated Plotting
-    plot_systematics_consolidated(
+    plt_nz.plot_systematics_consolidated(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
         ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
         nside, mask_footprint, 
@@ -268,7 +232,7 @@ def main():
     )
 
     # Histogram Plotting
-    plot_systematics_histograms(
+    plt_nz.plot_systematics_histograms(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
         ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
         mask_footprint,
