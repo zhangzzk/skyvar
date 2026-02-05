@@ -1,0 +1,14 @@
+{
+    "sigma_int_ref": 0.0212,
+    "sigma_pho_ref": 0.03105350221794637,
+    "snr_ref": 70,
+    "maglim0": 4,
+    "maglim1": 19.5,
+    "maglim2": 16,
+    "snr_min": 10.0,
+    "mag_max": 24.5,
+    "bias_base": 0.0,
+    "bias_snr_slope": -0.2,
+    "mode": "maglim",
+    "bin_by_z_pho": true
+}

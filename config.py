@@ -7,9 +7,9 @@ BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
 
 # --- 1. Global Simulation Settings ---
 SIM_SETTINGS = {
-    'sys_nside': 64,
-    'n_pop_sample': 5_000_000,
-    'chunk_size': 200_000_000,
+    'sys_nside': 32,
+    'n_pop_sample': 2_000_000,
+    'chunk_size': 100_000_000,
     'n_jobs': -1,  # Parallel processing threads
     'detection_threshold': 0.5,
 }
@@ -40,9 +40,20 @@ OBS_CONDITIONS = {
 
 # --- 4. Photo-z Model (from math/clustering_enhance.md) ---
 PHOTOZ_PARAMS = {
-    'sigma_int_ref': 0.0212 , 'sigma_pho_ref': 0.0376, 
-    'snr_ref': 35, 
-    'maglim0': 4, 'maglim1': 18, 'maglim2': 16, 'snr_min': 5,
+    'sigma0': 0.0376,
+    'sigma_min': 0,
+    'alpha': 0.4,
+    'm_ref': 22,
+    'rms_ref': 6.0,
+    'psf_fwhm_ref': 0.6,
+    
+    # 'sigma_int_ref': 0.0212 , 'sigma_pho_ref': (0.0376**2-0.0212**2)**0.5, 
+    # 'snr_ref': 70, 
+    'maglim0': 4, 'maglim1': 19.5, 'maglim2': 16, 'snr_min': 0,
+    
+    # Systematic Bias (z_pho shift ∝ 1/SNR)
+    # 'bias_base': 0.0,
+    # 'bias_snr_slope': -0.20,
 }
 
 STATS_PARAMS = {
@@ -58,7 +69,7 @@ ANALYSIS_SETTINGS = {
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],
     'smoothing_sigma_dz': 0.1,
     'smooth_nz': False,
-    'load_preds': False,
+    'load_preds': True,
 }
 
 # --- 6. Cosmology ---
@@ -92,8 +103,8 @@ SYSTEMATICS_CONFIG = {
 
     'noise': {
     'mu0': 6.0,        # global mean pixel noise
-    'sigma_tile': 0.5, # tile-to-tile scatter
-    'sigma_pix': 0.05  # small pixel-level jitter
+    'sigma_tile': 0.8, # tile-to-tile scatter
+    'sigma_pix': 0.0  # small pixel-level jitter
     },
 
     'psf': {
@@ -108,7 +119,7 @@ SYSTEMATICS_CONFIG = {
     'sigma_A': 0.04,      # scatter of amplitude across tiles
 
     # small pixel-level noise
-    'sigma_pix': 0.005,
+    'sigma_pix': 0.00,
 
     # Gaussian shape inside tiles
     'xmean_fluc': 0.15,

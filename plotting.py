@@ -254,7 +254,7 @@ def plot_all_comparisons(all_results, geometric_factors, output_dir):
 def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None, ax=None):
     """Plot HEALPix map for seen pixels."""
     if s is None:
-        s = 12*(256.0 / sys_nside)**2
+        s = 3*(256.0 / sys_nside)**3
         s = np.clip(s, 0.1, 100)
 
     n_pix = hp.nside2npix(sys_nside)
@@ -607,6 +607,100 @@ def plot_systematics_histograms(maps, labels, mask, output_path):
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
+
+def plot_systematics_overview(maps, labels, nside, mask, output_path):
+    """Plot maps and histograms for multiple systematics side-by-side (panel by panel)."""
+    n_maps = len(maps)
+    fig, axes = plt.subplots(n_maps, 2, figsize=(14, 3 * n_maps), 
+                             gridspec_kw={'width_ratios': [3.5, 1]})
+    
+    if n_maps == 1:
+        axes = axes[np.newaxis, :]
+        
+    colors = ['royalblue', 'coral', 'mediumseagreen']
+    
+    for i, (map_data, label) in enumerate(zip(maps, labels)):
+        # Map panel (Column 0)
+        plt_map(map_data, nside, mask, label=label, ax=axes[i, 0])
+        
+        # Histogram panel (Column 1)
+        data = map_data[mask]
+        data = data[~np.isnan(data)]
+        axes[i, 1].hist(data, bins=50, color=colors[i % len(colors)], 
+                          alpha=0.7, edgecolor='black', density=True)
+        axes[i, 1].set_title(f"{label} Distribution")
+        axes[i, 1].set_xlabel("Value")
+        axes[i, 1].set_ylabel("Density")
+        axes[i, 1].grid(True, linestyle='--', alpha=0.6)
+        
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+def plot_systematics_vs_metrics(sys_maps, sys_labels, metrics, metric_labels, seen_idx, output_dir, prefix="sys_vs"):
+    """Plot per-pixel systematics vs summary metrics with binned trends."""
+    if len(sys_maps) != len(sys_labels):
+        raise ValueError("sys_maps and sys_labels must have the same length.")
+    if len(metrics) != len(metric_labels):
+        raise ValueError("metrics and metric_labels must have the same length.")
+
+    seen_idx = np.asarray(seen_idx)
+    n_metrics = len(metrics)
+
+    for sys_map, sys_label in zip(sys_maps, sys_labels):
+        x_full = np.asarray(sys_map)[seen_idx]
+
+        fig, axes = plt.subplots(1, n_metrics, figsize=(5.5 * n_metrics, 4.2), squeeze=False)
+        axes = axes[0]
+
+        for ax, metric, metric_label in zip(axes, metrics, metric_labels):
+            y_full = np.asarray(metric)
+
+            finite = np.isfinite(x_full) & np.isfinite(y_full)
+            x = x_full[finite]
+            y = y_full[finite]
+
+            if x.size == 0:
+                ax.text(0.5, 0.5, "No finite data", ha="center", va="center")
+                ax.set_title(f"{sys_label} vs {metric_label}")
+                continue
+
+            ax.scatter(x, y, s=4, alpha=0.08, color="tab:blue", edgecolors="none")
+
+            lo, hi = np.percentile(x, [1, 99])
+            if hi > lo:
+                bins = np.linspace(lo, hi, 16)
+                bin_idx = np.digitize(x, bins) - 1
+                centers = 0.5 * (bins[:-1] + bins[1:])
+                med = np.full_like(centers, np.nan, dtype=float)
+                p16 = np.full_like(centers, np.nan, dtype=float)
+                p84 = np.full_like(centers, np.nan, dtype=float)
+
+                for i in range(len(centers)):
+                    sel = bin_idx == i
+                    if np.any(sel):
+                        med[i] = np.median(y[sel])
+                        p16[i] = np.percentile(y[sel], 16)
+                        p84[i] = np.percentile(y[sel], 84)
+
+                ax.plot(centers, med, color="black", lw=2, label="median")
+                ax.fill_between(centers, p16, p84, color="black", alpha=0.2, label="16-84%")
+
+            if x.size > 1:
+                corr = np.corrcoef(x, y)[0, 1]
+            else:
+                corr = np.nan
+
+            ax.set_title(f"{sys_label} vs {metric_label}\nPearson r={corr:.3f}")
+            ax.set_xlabel(sys_label)
+            ax.set_ylabel(metric_label)
+            ax.grid(True, alpha=0.3)
+            ax.legend(fontsize=8)
+
+        plt.tight_layout()
+        save_path = os.path.join(output_dir, f"{prefix}_{sys_label.replace(' ', '_').lower()}.png")
+        plt.savefig(save_path, dpi=200)
+        plt.close()
 
 def save_diagnostic_plots(results, output_dir, key='full'):
     """Generate and save distributions plots with pixel variations."""

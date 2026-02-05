@@ -223,20 +223,13 @@ def main():
     print(f"Saving maps to {output_path}...")
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
 
-    # Consolidated Plotting
-    plt_nz.plot_systematics_consolidated(
+    # Combined Plotting (Maps and Histograms)
+    print("Generating consolidated overview plots...")
+    plt_nz.plot_systematics_overview(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
         ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
         nside, mask_footprint, 
-        os.path.join("output", "sys_maps.png")
-    )
-
-    # Histogram Plotting
-    plt_nz.plot_systematics_histograms(
-        [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
-        ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
-        mask_footprint,
-        os.path.join("output", "sys_hists.png")
+        os.path.join("output", "sys_combined.png")
     )
 
 if __name__ == "__main__":

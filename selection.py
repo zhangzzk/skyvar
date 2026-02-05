@@ -75,7 +75,7 @@ DETECTION_THRESHOLD = config.SIM_SETTINGS['detection_threshold']
 NPIX = hp.nside2npix(SYS_NSIDE)
 PHOTOZ_PARAMS = config.PHOTOZ_PARAMS
 
-def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None):
+def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=None):
     """Compute per-pixel normalized n(z) and sum_num using vectorized operations."""
     z = np.asarray(z)
     edges = np.asarray(edges)
@@ -137,9 +137,14 @@ def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None):
     out.attrs['z_std_ratio'] = z_std_ratio
     out.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
 
-    # Global Truth; This assumes sys_cat contains all input galaxies
-    dndz_in = np.histogram(sys_cat["redshift_input_p"], bins=edges, density=True)[0]
-    num_in = sys_cat.shape[0] 
+    # Global Truth; If sim_truth is provided use it, otherwise fallback to sys_cat
+    if sim_truth is not None:
+        dndz_in = sim_truth['dndz_in']
+        num_in = sim_truth['num_in']
+    else:
+        # This assumes sys_cat contains all input galaxies (fallback)
+        dndz_in = np.histogram(sys_cat["redshift_input_p"], bins=edges, density=True)[0]
+        num_in = sys_cat.shape[0] 
 
     dndz_det = np.histogram(df_cut["redshift_input_p"], bins=edges, density=True, weights=df_cut["_w"])[0]
     num_det = df_cut["_w"].sum()
@@ -413,11 +418,6 @@ def process_one(i, idx, icat, conditions, gal_num, psf_hp_map, noise_hp_map, gal
         pixscale=subset['pixel_size'],
     )
     
-    # compute observed magnitude and redshift
-    subset = compute_obs_stats(subset, rng=rng_local)
-
-    # Apply MagLim selection right before running the simulation, to save memory.
-    subset = apply_maglim_selection(subset, rng=rng_local)
     return subset
 
 def compute_obs_stats(subset, rng=None):
@@ -425,79 +425,103 @@ def compute_obs_stats(subset, rng=None):
     if rng is None:
         rng = np.random.default_rng()
 
-    subset['snr'] = galaxy_snr_from_mag_size(
-        subset['r'],
-        subset['Re'],
-        subset['psf_fwhm'],
-        subset['pixel_rms'],
-        zeropoint=subset['zero_point'],
-        pixscale=subset['pixel_size'],
+    # Use names with _input_p suffix as they appear in the classified catalog
+    subset['snr_input_p'] = galaxy_snr_from_mag_size(
+        subset['r_input_p'],
+        subset['Re_input_p'],
+        subset['psf_fwhm_input_p'],
+        subset['pixel_rms_input_p'],
+        zeropoint=subset['zero_point_input_p'],
+        pixscale=subset['pixel_size_input_p'],
     )
 
-    # TODO: check why is this factor 2.5 / np.log(10)
     sigma_m = 2.5 / np.log(10) / subset['snr_input_p']
-    # subset['r_obs'] = subset['r'] + rng.normal(0, sigma_m, size=subset.shape[0])
-    subset['sigma_m'] = sigma_m
+    subset['r_obs_input_p'] = subset['r_input_p'] + rng.normal(0, sigma_m, size=subset.shape[0])
+    # subset['sigma_m_input_p'] = sigma_m
 
-    sig_pho = PHOTOZ_PARAMS['sigma_pho_ref'] * PHOTOZ_PARAMS['snr_ref'] / subset['snr']
-    sigma_z = np.sqrt(sig_pho**2 + PHOTOZ_PARAMS['sigma_int_ref']**2)
-    # subset['z_pho'] = subset['redshift'] + rng.normal(0, sigma_z, size=subset.shape[0])
-    subset['sigma_z'] = sigma_z
+    # --- New photo-z model (from snippet) ---
+    m = subset['r_input_p']
+    rms = subset['pixel_rms_input_p']
+    psf_fwhm = subset['psf_fwhm_input_p']
+
+    alpha = PHOTOZ_PARAMS['alpha']
+    sigma0 = PHOTOZ_PARAMS['sigma0']
+    m_ref = PHOTOZ_PARAMS['m_ref']
+    rms_ref = PHOTOZ_PARAMS['rms_ref']
+    psf_fwhm_ref = PHOTOZ_PARAMS['psf_fwhm_ref']
+
+    dm = 2.5 * np.log10((rms / rms_ref) * (psf_fwhm / psf_fwhm_ref)**2)
+    k = 10**(alpha * (m - m_ref + dm))
+
+    sigma_z = sigma0 * k
+    sigma_z = np.maximum(sigma_z, PHOTOZ_PARAMS['sigma_min'])
+    mu_z = subset['redshift_input_p']
+
+    # Compute photo-z with Gaussian scatter
+    z_pho = mu_z + rng.normal(0, sigma_z, size=subset.shape[0])
+    
+    subset['z_pho_input_p'] = z_pho
+    # subset['sigma_z_input_p'] = sigma_z
 
     return subset
 
 def apply_maglim_selection(subset, rng=None):
     """
-    Apply MagLim-like selection.
+    Apply MagLim-like selection using input properties.
     """
     if rng is None:
         rng = np.random.default_rng()
     
-    faint_cut = subset['r'] < (PHOTOZ_PARAMS['maglim0'] * subset['redshift'] + PHOTOZ_PARAMS['maglim1'])
-    bright_cut = subset['r'] > PHOTOZ_PARAMS['maglim2']
-    snr_cut = subset['snr'] > PHOTOZ_PARAMS['snr_min']
+    faint_cut = subset['r_obs_input_p'] < (PHOTOZ_PARAMS['maglim0'] * subset['z_pho_input_p'] + PHOTOZ_PARAMS['maglim1'])
+    bright_cut = subset['r_obs_input_p'] > PHOTOZ_PARAMS['maglim2']
+    snr_cut = subset['snr_input_p'] > PHOTOZ_PARAMS['snr_min']
 
     lens_keep = faint_cut & bright_cut & snr_cut
-    lens_keep &= (subset['redshift'] < config.ANALYSIS_SETTINGS['z_max']) # save memory
+    # lens_keep &= (subset['redshift_input_p'] < config.ANALYSIS_SETTINGS['z_max']) # save memory
     subset = subset[lens_keep].reset_index(drop=True)
     return subset
 
-def process_classified_catalog(df):
+def process_classified_catalog(df, rng=None):
     """
     Perform any actions between having a classified catalog and summary statistics.
-    Currently: photo-z assignment.
+    Currently: photo-z assignment and MagLim selection.
     """
+
+    # compute observed magnitude and redshift based on input properties
+    df = compute_obs_stats(df, rng=rng)
+
+    # Apply MagLim selection
+    df = apply_maglim_selection(df, rng=rng)
+
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     bin_mask = get_binning_weights(df, tomo_bin_edges)
     for i in range(len(tomo_bin_edges) - 1):
         df[f"tomo_p_{i}"] = bin_mask[:, i]
+    
+    # Final cleanup of unused columns to save memory
+    keep_cols = ['pix_idx_input_p', 'redshift_input_p', 'detection', 'snr_input_p',
+                 'r_input_p', 'Re_input_p', 'sigma_m_input_p', 'sigma_z_input_p',
+                 'pixel_rms_input_p', 'psf_fwhm_input_p']
+    tomo_cols = [c for c in df.columns if c.startswith('tomo_p_')]
+    final_cols = list(dict.fromkeys([c for c in keep_cols + tomo_cols if c in df.columns]))
+    df = df[final_cols].copy()
     
     return df
 
 def get_binning_weights(df, bin_edges):
     """
     Calculate tomographic bin membership probabilities for each galaxy.
+    Using "hard" binning (binary weights) based on simulated photo-z.
     """
-
-    mu_z = df['redshift_input_p']
-    sigma_z = df['sigma_z_input_p']
+    z_hat_g = df['z_pho_input_p'].values
+    weights = np.zeros((len(z_hat_g), len(bin_edges) - 1))
     
-    weights = []
     for i in range(len(bin_edges) - 1):
         z_min, z_max = bin_edges[i], bin_edges[i+1]
-        p_i = norm.cdf(z_max, loc=mu_z, scale=sigma_z) - \
-              norm.cdf(z_min, loc=mu_z, scale=sigma_z)
-        weights.append(p_i)
+        mask = (z_hat_g >= z_min) & (z_hat_g < z_max)
+        weights[mask, i] = 1.0
 
-    # z_hat = df['z_pho_input_p']
-    # weights = np.zeros((len(z_hat), len(bin_edges) - 1))
-    
-    # for i in range(len(bin_edges) - 1):
-    #     z_min, z_max = bin_edges[i], bin_edges[i+1]
-    #     mask = (z_hat >= z_min) & (z_hat < z_max)
-    #     weights[mask, i] = 1.0
-
-    return np.array(weights).T
+    return weights
 
 
 def simulate_and_classify_chunked(gal_cat, n_degree2, z, edges):
@@ -564,12 +588,21 @@ def simulate_and_classify_chunked(gal_cat, n_degree2, z, edges):
             # CRITICAL: Keep only detections to save memory
             block_cla = block_cla[block_cla['detection'] > DETECTION_THRESHOLD].copy()
             
+            # Drop unnecessary columns to save memory before saving to disk
+            keep_cols = [
+                'pix_idx_input_p', 'redshift_input_p', 'detection',
+                'r_input_p', 'Re_input_p', 'psf_fwhm_input_p', 'pixel_rms_input_p',
+                'zero_point_input_p', 'pixel_size_input_p'
+            ]
+            block_cla = block_cla[[c for c in keep_cols if c in block_cla.columns]].copy()
+            
             if not block_cla.empty:
                 temp_path = os.path.join(temp_dir, f"cla_chunk_det_{start_p}.feather")
                 block_cla.to_feather(temp_path)
                 chunk_files.append(temp_path)
         except Exception as e:
-            print(f"Error processing block {start_p}: {e}")
+            print(f"CRITICAL ERROR processing block {start_p}: {e}")
+            raise RuntimeError(f"Simulation failed at block {start_p}. Terminating for robustness.") from e
         
         block_fullset = None
         block_cla = None
@@ -592,7 +625,7 @@ def simulate_and_classify_chunked(gal_cat, n_degree2, z, edges):
     return chunk_files, psf_hp_map, SEEN_idx, sim_truth
 
 
-def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges):
+def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges, sim_truth=None):
     """Compute detection maps and dN/dz distributions from a catalog."""
     mean_p = np.full(NPIX, hp.UNSEEN)
     
@@ -600,6 +633,9 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges
     pixel_counts = np.bincount(cla_cat['pix_idx_input_p'], weights=cla_cat['detection'], minlength=NPIX)
     mean_p[SEEN_idx] = pixel_counts[SEEN_idx] / N_POP_SAMPLE
     
+    p_valid = mean_p[SEEN_idx]
+    print(f"Detection Rate Stats: min={np.min(p_valid):.4f}, max={np.max(p_valid):.4f}, mean={np.mean(p_valid):.4f}")
+
     plt_nz.plt_map(mean_p, SYS_NSIDE, SEEN_idx, 
             save_path=os.path.join(output_dir, "detection_rate_map.png"))
     
@@ -609,7 +645,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges
     # 1. Full Sample
     print("Calculating dN/dz for full sample...")
     
-    sys_res_full = groupby_dndz(cla_cat, z, edges)
+    sys_res_full = groupby_dndz(cla_cat, z, edges, sim_truth=sim_truth)
     metadata_rows_full = sys_res_full.loc[["total_input", "total_detected"]].copy()
     sys_res_data_full = sys_res_full.reindex(SEEN_idx).fillna(0)
     sys_res_final_full = pd.concat([sys_res_data_full, metadata_rows_full])
@@ -622,7 +658,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges
         tomo_col = f"tomo_p_{i}"
         if tomo_col in cla_cat.columns:
             print(f"Calculating dN/dz for tomo_{i}...")
-            sys_res_i = groupby_dndz(cla_cat, z, edges, weight_col=tomo_col)
+            sys_res_i = groupby_dndz(cla_cat, z, edges, weight_col=tomo_col, sim_truth=sim_truth)
             meta_i = sys_res_i.loc[["total_input", "total_detected"]].copy()
             sys_res_i_data = sys_res_i.reindex(SEEN_idx).fillna(0)
             sys_res_i_final = pd.concat([sys_res_i_data, meta_i])
@@ -678,154 +714,154 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
         }
 
 
-def generate_summary_statistics_incremental(chunk_files, SEEN_idx, output_dir, z, edges):
-    """Memory-efficient incremental statistics generation."""
-    import gc
-    tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
-    keys = ['full'] + [f'tomo_{i}' for i in range(len(tomo_bin_edges)-1)]
-    dz = np.diff(edges)
-    n_z = len(z)
+# def generate_summary_statistics_incremental(chunk_files, SEEN_idx, output_dir, z, edges):
+#     """Memory-efficient incremental statistics generation."""
+#     import gc
+#     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
+#     keys = ['full'] + [f'tomo_{i}' for i in range(len(tomo_bin_edges)-1)]
+#     dz = np.diff(edges)
+#     n_z = len(z)
 
-    # Accumulators
-    det_counts_map = np.zeros(NPIX)
+#     # Accumulators
+#     det_counts_map = np.zeros(NPIX)
     
-    accumulators = {k: np.zeros((NPIX, n_z)) for k in keys}
-    total_det_nums = {k: 0.0 for k in keys}
-    total_det_hists = {k: np.zeros(n_z) for k in keys}
+#     accumulators = {k: np.zeros((NPIX, n_z)) for k in keys}
+#     total_det_nums = {k: 0.0 for k in keys}
+#     total_det_hists = {k: np.zeros(n_z) for k in keys}
     
-    # Track the global input population distribution
-    global_input_hist = np.zeros(n_z)
-    total_input_num = 0
+#     # Track the global input population distribution
+#     global_input_hist = np.zeros(n_z)
+#     total_input_num = 0
     
-    # Accumulators for z_std_ratio
-    w_sum_pix = {k: np.zeros(NPIX) for k in keys}
-    wz_sum_pix = {k: np.zeros(NPIX) for k in keys}
-    wz2_sum_pix = {k: np.zeros(NPIX) for k in keys}
+#     # Accumulators for z_std_ratio
+#     w_sum_pix = {k: np.zeros(NPIX) for k in keys}
+#     wz_sum_pix = {k: np.zeros(NPIX) for k in keys}
+#     wz2_sum_pix = {k: np.zeros(NPIX) for k in keys}
     
-    total_z_w_sum = {k: 0.0 for k in keys}
-    total_z_wz_sum = {k: 0.0 for k in keys}
-    total_z_wz2_sum = {k: 0.0 for k in keys}
+#     total_z_w_sum = {k: 0.0 for k in keys}
+#     total_z_wz_sum = {k: 0.0 for k in keys}
+#     total_z_wz2_sum = {k: 0.0 for k in keys}
 
-    print(f"Incremental accumulation from chunks (with post-detection cuts)...")
-    for f in chunk_files:
-        df = pd.read_feather(f)
-        if df.empty: continue
+#     print(f"Incremental accumulation from chunks (with post-detection cuts)...")
+#     for f in chunk_files:
+#         df = pd.read_feather(f)
+#         if df.empty: continue
         
-        df = process_classified_catalog(df)
-        if df.empty: continue
+#         df = process_classified_catalog(df)
+#         if df.empty: continue
 
-        pixel_indices = df["pix_idx_input_p"].values
-        z_vals = df["redshift_input_p"].values
-        weights_det = df["detection"].values
+#         pixel_indices = df["pix_idx_input_p"].values
+#         z_vals = df["redshift_input_p"].values
+#         weights_det = df["detection"].values
         
-        # Accumulate input truth (unweighted by detection)
-        global_input_hist += np.histogram(z_vals, bins=edges)[0]
-        total_input_num += len(df)
+#         # Accumulate input truth (unweighted by detection)
+#         global_input_hist += np.histogram(z_vals, bins=edges)[0]
+#         total_input_num += len(df)
         
-        # Detection rate map (soft count)
-        pixel_counts = np.bincount(pixel_indices, weights=weights_det, minlength=NPIX)
-        det_counts_map += pixel_counts
+#         # Detection rate map (soft count)
+#         pixel_counts = np.bincount(pixel_indices, weights=weights_det, minlength=NPIX)
+#         det_counts_map += pixel_counts
         
 
-        for k in keys:
-            if k == 'full':
-                weights = weights_det
-            else:
-                idx = int(k.split('_')[1])
-                weights = weights_det * df[f'tomo_p_{idx}'].values
+#         for k in keys:
+#             if k == 'full':
+#                 weights = weights_det
+#             else:
+#                 idx = int(k.split('_')[1])
+#                 weights = weights_det * df[f'tomo_p_{idx}'].values
                 
-            total_det_nums[k] += weights.sum()
-            total_det_hists[k] += np.histogram(z_vals, bins=edges, weights=weights)[0]
+#             total_det_nums[k] += weights.sum()
+#             total_det_hists[k] += np.histogram(z_vals, bins=edges, weights=weights)[0]
             
-            # Per-pixel histogram accumulation
-            pixel_counts_k, _ = utils.compute_pixel_histograms(
-                pix_idx=pixel_indices,
-                vals=z_vals,
-                weights=weights,
-                edges=edges,
-                n_pix=NPIX
-            )
-            accumulators[k] += pixel_counts_k
+#             # Per-pixel histogram accumulation
+#             pixel_counts_k, _ = utils.compute_pixel_histograms(
+#                 pix_idx=pixel_indices,
+#                 vals=z_vals,
+#                 weights=weights,
+#                 edges=edges,
+#                 n_pix=NPIX
+#             )
+#             accumulators[k] += pixel_counts_k
 
-            # Redshift-based accumulation
-            w_sum_pix[k] += np.bincount(pixel_indices, weights=weights, minlength=NPIX)
-            wz_sum_pix[k] += np.bincount(pixel_indices, weights=weights * z_vals, minlength=NPIX)
-            wz2_sum_pix[k] += np.bincount(pixel_indices, weights=weights * z_vals**2, minlength=NPIX)
+#             # Redshift-based accumulation
+#             w_sum_pix[k] += np.bincount(pixel_indices, weights=weights, minlength=NPIX)
+#             wz_sum_pix[k] += np.bincount(pixel_indices, weights=weights * z_vals, minlength=NPIX)
+#             wz2_sum_pix[k] += np.bincount(pixel_indices, weights=weights * z_vals**2, minlength=NPIX)
             
-            total_z_w_sum[k] += weights.sum()
-            total_z_wz_sum[k] += (weights * z_vals).sum()
-            total_z_wz2_sum[k] += (weights * z_vals**2).sum()
+#             total_z_w_sum[k] += weights.sum()
+#             total_z_wz_sum[k] += (weights * z_vals).sum()
+#             total_z_wz2_sum[k] += (weights * z_vals**2).sum()
             
-        df = None
-        gc.collect()
+#         df = None
+#         gc.collect()
 
-    # Post-process and packaging
-    final_results = {}
+#     # Post-process and packaging
+#     final_results = {}
     
-    # 1. Detection Rate Map
-    mean_p = np.full(NPIX, hp.UNSEEN)
-    mean_p[SEEN_idx] = det_counts_map[SEEN_idx] / N_POP_SAMPLE
+#     # 1. Detection Rate Map
+#     mean_p = np.full(NPIX, hp.UNSEEN)
+#     mean_p[SEEN_idx] = det_counts_map[SEEN_idx] / N_POP_SAMPLE
     
-    p_valid = mean_p[SEEN_idx]
-    print(f"Detection Rate Stats: min={np.min(p_valid):.4f}, max={np.max(p_valid):.4f}, mean={np.mean(p_valid):.4f}")
+#     p_valid = mean_p[SEEN_idx]
+#     print(f"Detection Rate Stats: min={np.min(p_valid):.4f}, max={np.max(p_valid):.4f}, mean={np.mean(p_valid):.4f}")
     
-    plt_nz.plt_map(mean_p, SYS_NSIDE, SEEN_idx, 
-            save_path=os.path.join(output_dir, "detection_rate_map.png"))
+#     plt_nz.plt_map(mean_p, SYS_NSIDE, SEEN_idx, 
+#             save_path=os.path.join(output_dir, "detection_rate_map.png"))
 
-    for k in keys:
-        pixel_counts = accumulators[k]
-        sum_num = pixel_counts.sum(axis=1)
+#     for k in keys:
+#         pixel_counts = accumulators[k]
+#         sum_num = pixel_counts.sum(axis=1)
         
-        # Filter to SEEN_idx and normalize
-        active_counts = pixel_counts[SEEN_idx]
-        active_sum_num = sum_num[SEEN_idx]
+#         # Filter to SEEN_idx and normalize
+#         active_counts = pixel_counts[SEEN_idx]
+#         active_sum_num = sum_num[SEEN_idx]
         
-        hist_raw = np.zeros_like(active_counts)
-        mask_v = active_sum_num > 0
-        hist_raw[mask_v] = active_counts[mask_v] / (active_sum_num[mask_v][:, None] * dz)
+#         hist_raw = np.zeros_like(active_counts)
+#         mask_v = active_sum_num > 0
+#         hist_raw[mask_v] = active_counts[mask_v] / (active_sum_num[mask_v][:, None] * dz)
         
-        df_stats = pd.DataFrame(hist_raw)
-        df_stats["sum_num"] = active_sum_num
-        # Calculate redshift stats for this bin using accumulated sums
-        std_z_all, std_z_pix, z_std_ratio = utils.compute_redshift_stats_from_sums(
-            w_sum_pix=w_sum_pix[k][SEEN_idx],
-            wz_sum_pix=wz_sum_pix[k][SEEN_idx],
-            wz2_sum_pix=wz2_sum_pix[k][SEEN_idx],
-            total_w=total_z_w_sum[k],
-            total_wz=total_z_wz_sum[k],
-            total_wz2=total_z_wz2_sum[k]
-        )
-        df_stats["std_z_pix"] = std_z_pix
-        df_stats.attrs['z_std_ratio'] = z_std_ratio
+#         df_stats = pd.DataFrame(hist_raw)
+#         df_stats["sum_num"] = active_sum_num
+#         # Calculate redshift stats for this bin using accumulated sums
+#         std_z_all, std_z_pix, z_std_ratio = utils.compute_redshift_stats_from_sums(
+#             w_sum_pix=w_sum_pix[k][SEEN_idx],
+#             wz_sum_pix=wz_sum_pix[k][SEEN_idx],
+#             wz2_sum_pix=wz2_sum_pix[k][SEEN_idx],
+#             total_w=total_z_w_sum[k],
+#             total_wz=total_z_wz_sum[k],
+#             total_wz2=total_z_wz2_sum[k]
+#         )
+#         df_stats["std_z_pix"] = std_z_pix
+#         df_stats.attrs['z_std_ratio'] = z_std_ratio
 
-        w_sum_seen = w_sum_pix[k][SEEN_idx]
-        mask_v = (w_sum_seen > 0) & (std_z_pix > 0)
-        mean_std_z_pix_unweighted = np.mean(std_z_pix[w_sum_seen > 0]) if np.any(w_sum_seen > 0) else 0.0
+#         w_sum_seen = w_sum_pix[k][SEEN_idx]
+#         mask_v = (w_sum_seen > 0) & (std_z_pix > 0)
+#         mean_std_z_pix_unweighted = np.mean(std_z_pix[w_sum_seen > 0]) if np.any(w_sum_seen > 0) else 0.0
         
-        if np.any(mask_v):
-            z_std_ratio_weighted = np.average(1.0 / std_z_pix[mask_v], weights=w_sum_seen[mask_v]) * std_z_all
-        else:
-            z_std_ratio_weighted = 1.0
+#         if np.any(mask_v):
+#             z_std_ratio_weighted = np.average(1.0 / std_z_pix[mask_v], weights=w_sum_seen[mask_v]) * std_z_all
+#         else:
+#             z_std_ratio_weighted = 1.0
 
-        df_stats.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
-        print(
-            f"[{k:10s}] Redshift-based std ratio: {z_std_ratio:.6f} "
-            f"(pix-wtd inverse: {z_std_ratio_weighted:.6f}; "
-            f"mean_std_pix={mean_std_z_pix_unweighted:.6f})"
-        )
+#         df_stats.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
+#         print(
+#             f"[{k:10s}] Redshift-based std ratio: {z_std_ratio:.6f} "
+#             f"(pix-wtd inverse: {z_std_ratio_weighted:.6f}; "
+#             f"mean_std_pix={mean_std_z_pix_unweighted:.6f})"
+#         )
 
-        # dndz totals
-        d_det = total_det_hists[k] / (total_det_nums[k] * dz) if total_det_nums[k] > 0 else total_det_hists[k]
+#         # dndz totals
+#         d_det = total_det_hists[k] / (total_det_nums[k] * dz) if total_det_nums[k] > 0 else total_det_hists[k]
         
-        # Reference Baseline (Input)
-        d_in = global_input_hist / (total_input_num * dz) if total_input_num > 0 else d_det
+#         # Reference Baseline (Input)
+#         d_in = global_input_hist / (total_input_num * dz) if total_input_num > 0 else d_det
 
-        df_stats.loc["total_input"] = list(d_in) + [total_input_num, 0.0]
-        df_stats.loc["total_detected"] = list(d_det) + [total_det_nums[k], std_z_all]
+#         df_stats.loc["total_input"] = list(d_in) + [total_input_num, 0.0]
+#         df_stats.loc["total_detected"] = list(d_det) + [total_det_nums[k], std_z_all]
         
-        final_results[k] = process_stats(df_stats, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
+#         final_results[k] = process_stats(df_stats, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
     
-    return final_results
+#     return final_results
 
 
 
@@ -896,6 +932,8 @@ def main():
     z, edges = utils.get_redshift_bins(None)
     print(f"[Binning] Fixed Grid: z=[{edges[0]:.4f}, {edges[-1]:.4f}], dz={(edges[1]-edges[0]):.4f}, n_bins={len(z)}")
 
+    maps, SEEN_idx = load_system_maps()
+
     if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
         print(f"Loading existing predictions from {OUTPUT_PREDS}...")
         cla_cat = pd.read_feather(OUTPUT_PREDS)
@@ -903,7 +941,6 @@ def main():
         print("Processing loaded catalog (photo-z, cuts)...")
         cla_cat = process_classified_catalog(cla_cat)
         
-        _, SEEN_idx = load_system_maps()
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges)
     else:
         if not os.path.exists(OUTPUT_PREDS):
@@ -912,14 +949,19 @@ def main():
         
         chunk_files, psf_hp_map, SEEN_idx, sim_truth = simulate_and_classify_chunked(gal_cat, n_degree2, z=z, edges=edges)
         
-        results = generate_summary_statistics_incremental(chunk_files, SEEN_idx, output_dir, z, edges)
-        
         # Consolidation of detected galaxies (ONLY detected, so much smaller)
         print(f"Re-assembling {len(chunk_files)} detected-only chunks...")
         cla_cat = pd.concat([pd.read_feather(f) for f in chunk_files], ignore_index=True)
+
+        print(f"Saving raw detected catalog to {OUTPUT_PREDS}...")
+        os.makedirs(os.path.dirname(OUTPUT_PREDS), exist_ok=True)
+        cla_cat.to_feather(OUTPUT_PREDS)
         
         print("Final processing of consolidated catalog...")
         cla_cat = process_classified_catalog(cla_cat)
+        
+        print("Generating statistics from consolidated catalog...")
+        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges, sim_truth=sim_truth)
             
         print(f"    Memory usage after re-assembly and processing: {get_memory_usage():.2f} GB")
         
@@ -932,10 +974,7 @@ def main():
         except:
             pass
             
-        print(f"Saving detected catalog (full) to {OUTPUT_PREDS}...")
-        os.makedirs(os.path.dirname(OUTPUT_PREDS), exist_ok=True)
-        cla_cat.to_feather(OUTPUT_PREDS)
-        print(f"    Memory usage after saving: {get_memory_usage():.2f} GB")
+        print(f"    Memory usage at end of simulation: {get_memory_usage():.2f} GB")
     
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     # results already generated incrementally in the else block
