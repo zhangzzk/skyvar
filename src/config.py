@@ -40,8 +40,8 @@ OBS_CONDITIONS = {
 
 # --- 4. Photo-z Model (from math/clustering_enhance.md) ---
 PHOTOZ_PARAMS = {
-    'sigma0': 0.0376,
-    'sigma_min': 0,
+    'sigma0': 0.04,
+    'sigma_min': 0.02,
     'alpha': 0.4,
     'm_ref': 22,
     'rms_ref': 6.0,
@@ -49,7 +49,7 @@ PHOTOZ_PARAMS = {
     
     # 'sigma_int_ref': 0.0212 , 'sigma_pho_ref': (0.0376**2-0.0212**2)**0.5, 
     # 'snr_ref': 70, 
-    'maglim0': 4, 'maglim1': 19.5, 'maglim2': 16, 'snr_min': 0,
+    'maglim0': 2, 'maglim1': 20.5, 'maglim2': 16, 'snr_min': 0,
     
     # Systematic Bias (z_pho shift ∝ 1/SNR)
     # 'bias_base': 0.0,
@@ -63,11 +63,11 @@ STATS_PARAMS = {
 
 # --- 5. Redshift Binning & Analysis ---
 ANALYSIS_SETTINGS = {
-    'z_bins': 60,
+    'z_bins': 100,
     'z_min': 0.0,
     'z_max': 2.0,
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],
-    'smoothing_sigma_dz': 0.1,
+    'smoothing_sigma_dz': 0.02,
     'smooth_nz': False,
     'load_preds': True,
 }

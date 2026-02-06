@@ -308,7 +308,7 @@ def plot_geo_factor_z(z_mid, n_maps, nbar, output_dir, filename="geo_factor_z.pn
 
 def plot_tomographic_bins(results, output_dir):
     """Plot the global n(z) for all tomographic bins on one plot with variations."""
-    plt.figure(figsize=(10, 6))
+    plt.figure(figsize=(12, 6))
     tomo_keys = sorted([k for k in results.keys() if k.startswith('tomo_')], 
                        key=lambda x: int(x.split('_')[1]))
     
@@ -332,7 +332,7 @@ def plot_tomographic_bins(results, output_dir):
 
         plt.plot(z, stats['dndz_det'], color=color, lw=2., label=f"Bin {i}")
 
-    plt.xlim(0, 2)
+    plt.xlim(0, 1.6)
     plt.xlabel('Redshift $z$')
     plt.ylabel('$n(z)$')
     plt.title('Tomographic Bin Redshift Distributions (with spatial variations)')

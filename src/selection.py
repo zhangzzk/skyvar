@@ -688,6 +688,8 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
 
     # Geometric and Redshift Stats
     geo_w_pix, geo_w_glob, geo_enhancement = utils.calculate_geometric_stats(z, dndzs, dndz_det, frac_pix=None)
+    z_std_ratio_binned = utils.calculate_binned_std_ratio(z, dndzs, dndz_det, frac_pix=None)
+    z_std_ratio_weighted = sys_res.attrs.get('z_std_ratio_pix_weighted', 1.0)
 
     if smooth:
         print(f"Smoothing {dndzs.shape[0]} distributions...")
@@ -698,18 +700,27 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
         
         # Recalculate widths for smoothed distributions
         sm_geo_w_pix, sm_geo_w_glob, sm_geo_enhancement = utils.calculate_geometric_stats(z, sm_dndzs, sm_dndz_det, frac_pix=None)
-    
+        sm_z_std_ratio_binned = utils.calculate_binned_std_ratio(z, sm_dndzs, sm_dndz_det, frac_pix=None)
+
         return {
             'z': z, 'dndzs': sm_dndzs, 'dndz_in': sm_dndz_in, 'dndz_det': sm_dndz_det,
             'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
-            'z_std_ratio': z_std_ratio, 'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
+            'z_std_ratio': z_std_ratio, 
+            'z_std_ratio_weighted': z_std_ratio_weighted,
+            'z_std_ratio_binned': sm_z_std_ratio_binned,
+            'z_std_ratio_binned_unsmoothed': z_std_ratio_binned,
+            'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
             'geo_width_pix': sm_geo_w_pix, 'geo_width_global': sm_geo_w_glob, 'geo_enhancement': sm_geo_enhancement
         }
     else:
         return {
             'z': z, 'dndzs': dndzs, 'dndz_in': dndz_in, 'dndz_det': dndz_det,
             'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
-            'z_std_ratio': z_std_ratio, 'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
+            'z_std_ratio': z_std_ratio, 
+            'z_std_ratio_weighted': z_std_ratio_weighted,
+            'z_std_ratio_binned': z_std_ratio_binned,
+            'z_std_ratio_binned_unsmoothed': z_std_ratio_binned,
+            'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
             'geo_width_pix': geo_w_pix, 'geo_width_global': geo_w_glob, 'geo_enhancement': geo_enhancement
         }
 
@@ -996,9 +1007,15 @@ def main():
             save_fits_output(results[f'tomo_{i}'], bin_idx=i)
 
     print("\n--- Enhancement Factor Results ---")
+    print(f"{'Bin':<12} | {'GeoEnh':<8} | {'zStd(Unw)':<10} | {'zStd(Wtd)':<10} | {'Binned(Sm)':<10} | {'Binned(Unsm)':<12}")
+    print("-" * 80)
     for key, stats in results.items():
-        print(f"Geometric Enhancement Factor ({key:10s}): {stats.get('geo_enhancement', 1.0):.6f}")
-        print(f"Redshift-based std Ratio   ({key:10s}): {stats.get('z_std_ratio', 1.0):.6f}")
+        print(f"{key:<12} | "
+              f"{stats.get('geo_enhancement', 1.0):.4f} | "
+              f"{stats.get('z_std_ratio', 1.0):.4f} | "
+              f"{stats.get('z_std_ratio_weighted', 1.0):.4f} | "
+              f"{stats.get('z_std_ratio_binned', 1.0):.4f} | "
+              f"{stats.get('z_std_ratio_binned_unsmoothed', 1.0):.4f}")
 
 
 if __name__ == "__main__":

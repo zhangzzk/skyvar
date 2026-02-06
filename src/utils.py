@@ -26,15 +26,19 @@ def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
     geo_width_global = 1.0 / l2_glob if l2_glob > 0 else 0.0
 
     # correction for resolution bias
-    dz = np.mean(np.diff(z))
-    geo_width_pix = np.sqrt(geo_width_pix**2 + dz**2/12)
-    geo_width_global = np.sqrt(geo_width_global**2 + dz**2/12)
-    
+    # dz = np.mean(np.diff(z))
+    # geo_width_pix = np.sqrt(geo_width_pix**2 + dz**2/12)
+    # geo_width_global = np.sqrt(geo_width_global**2 + dz**2/12)
+
+    # Use corrected L2 norms (1/width) for enhancement factor
+    # l2_pix_corr = np.where(geo_width_pix > 0, 1.0 / geo_width_pix, 0.0)
+    # l2_glob_corr = 1.0 / geo_width_global if geo_width_global > 0 else 0.0
+
     if frac_pix is None:
         mean_l2 = np.mean(l2_pix)
     else:
         mean_l2 = np.average(l2_pix, weights=frac_pix)
-    
+
     enhancement = mean_l2 / l2_glob if l2_glob > 0 else 1.0
     
     # If input was 1D, return 1D array for geo_width_pix
@@ -42,6 +46,35 @@ def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
         geo_width_pix = geo_width_pix[0]
         
     return geo_width_pix, geo_width_global, enhancement
+
+def calculate_binned_std_ratio(z, dndzs, dndz_glob, frac_pix=None):
+    """
+    Calculate the standard deviation ratio (mean(1/sigma_i) * sigma_all) 
+    using binned n(z) distributions.
+    """
+    if dndzs.ndim == 1:
+        dndzs = dndzs[None, :]
+
+    _, sig_pix = cal_sigz(dndzs, z)
+    _, sig_glob = cal_sigz(dndz_glob, z)
+
+    valid = (sig_pix > 0) & np.isfinite(sig_pix)
+    if not np.any(valid):
+        return 1.0
+
+    inv_sig = 1.0 / sig_pix[valid]
+    
+    if frac_pix is None:
+        mean_inv_sig = np.mean(inv_sig)
+    else:
+        # Match weight dimensions to valid pixels
+        weights = frac_pix[valid]
+        if weights.sum() > 0:
+            mean_inv_sig = np.average(inv_sig, weights=weights)
+        else:
+            mean_inv_sig = np.mean(inv_sig)
+
+    return mean_inv_sig * sig_glob
 
 def calculate_geometric_enhancement(z, dndzs, dndz_glob, frac_pix=None):
     """Deprecated: use calculate_geometric_stats instead."""
