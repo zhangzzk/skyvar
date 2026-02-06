@@ -642,9 +642,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges
     results = {}
     dz = np.diff(edges)
 
-    # 1. Full Sample
-    print("Calculating dN/dz for full sample...")
-    
+    # Full Sample
     sys_res_full = groupby_dndz(cla_cat, z, edges, sim_truth=sim_truth)
     metadata_rows_full = sys_res_full.loc[["total_input", "total_detected"]].copy()
     sys_res_data_full = sys_res_full.reindex(SEEN_idx).fillna(0)
@@ -652,12 +650,11 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges
     
     results['full'] = process_stats(sys_res_final_full, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
     
-    # 2. Tomographic Bins
+    # Tomographic Bins
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     for i in range(len(tomo_bin_edges)-1):
         tomo_col = f"tomo_p_{i}"
         if tomo_col in cla_cat.columns:
-            print(f"Calculating dN/dz for tomo_{i}...")
             sys_res_i = groupby_dndz(cla_cat, z, edges, weight_col=tomo_col, sim_truth=sim_truth)
             meta_i = sys_res_i.loc[["total_input", "total_detected"]].copy()
             sys_res_i_data = sys_res_i.reindex(SEEN_idx).fillna(0)
@@ -686,7 +683,7 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
 
     z_std_ratio = sys_res.attrs.get('z_std_ratio', 1.0)
 
-    # Geometric and Redshift Stats
+    # Calculate unsmoothed stats (baseline)
     geo_w_pix, geo_w_glob, geo_enhancement = utils.calculate_geometric_stats(z, dndzs, dndz_det, frac_pix=None)
     z_std_ratio_binned = utils.calculate_binned_std_ratio(z, dndzs, dndz_det, frac_pix=None)
     z_std_ratio_weighted = sys_res.attrs.get('z_std_ratio_pix_weighted', 1.0)
@@ -710,7 +707,9 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
             'z_std_ratio_binned': sm_z_std_ratio_binned,
             'z_std_ratio_binned_unsmoothed': z_std_ratio_binned,
             'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
-            'geo_width_pix': sm_geo_w_pix, 'geo_width_global': sm_geo_w_glob, 'geo_enhancement': sm_geo_enhancement
+            'geo_width_pix': sm_geo_w_pix, 'geo_width_global': sm_geo_w_glob, 
+            'geo_enhancement': sm_geo_enhancement,
+            'geo_enhancement_unsmoothed': geo_enhancement
         }
     else:
         return {
@@ -721,7 +720,9 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
             'z_std_ratio_binned': z_std_ratio_binned,
             'z_std_ratio_binned_unsmoothed': z_std_ratio_binned,
             'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
-            'geo_width_pix': geo_w_pix, 'geo_width_global': geo_w_glob, 'geo_enhancement': geo_enhancement
+            'geo_width_pix': geo_w_pix, 'geo_width_global': geo_w_glob, 
+            'geo_enhancement': geo_enhancement,
+            'geo_enhancement_unsmoothed': geo_enhancement
         }
 
 
@@ -893,14 +894,12 @@ def save_fits_output(stats, bin_idx=4):
         fits.ImageHDU(stats['dndz_det'], name='DNDZ_DET'),
         fits.ImageHDU([stats['frac']], name='FRAC'),
         fits.ImageHDU(stats['frac_pix'], name='FRAC_PIX'),
-        # fits.ImageHDU(stats['sm_dndzs'], name='SM_DNDZS'),
-        # fits.ImageHDU(stats['sm_dndz_in'], name='SM_DNDZ_IN'),
-        # fits.ImageHDU(stats['sm_dndz_det'], name='SM_DNDZ_DET'),
         fits.ImageHDU(stats['SEEN_idx'], name='SEEN_IDX'),
         fits.ImageHDU([stats.get('z_std_ratio', 1.0)], name='Z_STD_RATIO'),
         fits.ImageHDU(stats['std_z_pix'], name='STD_Z_PIX'),
         fits.ImageHDU(stats.get('geo_width_pix', np.zeros_like(stats['std_z_pix'])), name='GEO_WIDTH_PIX'),
-        fits.ImageHDU([stats.get('geo_width_global', 0.0)], name='GEO_WIDTH_GLOBAL')
+        fits.ImageHDU([stats.get('geo_width_global', 0.0)], name='GEO_WIDTH_GLOBAL'),
+        fits.ImageHDU([stats.get('geo_enhancement_unsmoothed', 1.0)], name='GEO_ENH_UNSM')
     ]
     fits.HDUList(hdus).writeto(output_fits_path, overwrite=True)
     print(f"Results saved to {output_fits_path}")
@@ -921,14 +920,12 @@ def load_fits_output(bin_idx=4):
             'dndz_det': hdul['DNDZ_DET'].data,
             'frac': hdul['FRAC'].data[0],
             'frac_pix': hdul['FRAC_PIX'].data,
-            # 'sm_dndzs': hdul['SM_DNDZS'].data,
-            # 'sm_dndz_in': hdul['SM_DNDZ_IN'].data,
-            # 'sm_dndz_det': hdul['SM_DNDZ_DET'].data,
             'SEEN_idx': hdul['SEEN_IDX'].data,
             'z_std_ratio': hdul['Z_STD_RATIO'].data[0] if 'Z_STD_RATIO' in hdul else 1.0,
             'std_z_pix': hdul['STD_Z_PIX'].data if 'STD_Z_PIX' in hdul else np.zeros_like(hdul['FRAC_PIX'].data),
             'geo_width_pix': hdul['GEO_WIDTH_PIX'].data if 'GEO_WIDTH_PIX' in hdul else np.zeros_like(hdul['FRAC_PIX'].data),
-            'geo_width_global': hdul['GEO_WIDTH_GLOBAL'].data[0] if 'GEO_WIDTH_GLOBAL' in hdul else 0.0
+            'geo_width_global': hdul['GEO_WIDTH_GLOBAL'].data[0] if 'GEO_WIDTH_GLOBAL' in hdul else 0.0,
+            'geo_enhancement_unsmoothed': hdul['GEO_ENH_UNSM'].data[0] if 'GEO_ENH_UNSM' in hdul else 1.0
         }
     return stats
 
@@ -970,8 +967,6 @@ def main():
         
         print("Final processing of consolidated catalog...")
         cla_cat = process_classified_catalog(cla_cat)
-        
-        print("Generating statistics from consolidated catalog...")
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges, sim_truth=sim_truth)
             
         print(f"    Memory usage after re-assembly and processing: {get_memory_usage():.2f} GB")
@@ -987,9 +982,6 @@ def main():
             
         print(f"    Memory usage at end of simulation: {get_memory_usage():.2f} GB")
     
-    tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
-    # results already generated incrementally in the else block
-    
     plt_nz.save_diagnostic_plots(results, output_dir)
     plt_nz.plot_tomographic_bins(results, output_dir)
     plt_nz.plot_snr_fractions(cla_cat, output_dir, z=z, edges=edges)
@@ -1001,20 +993,22 @@ def main():
     
     # Save full sample and tomographic bins
     # Using bin_idx=99 for full sample to avoid overlap with tomo bins
+    tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     save_fits_output(results['full'], bin_idx=99) 
     for i in range(len(tomo_bin_edges) - 1):
         if f'tomo_{i}' in results:
             save_fits_output(results[f'tomo_{i}'], bin_idx=i)
 
     print("\n--- Enhancement Factor Results ---")
-    print(f"{'Bin':<12} | {'GeoEnh':<8} | {'zStd(Unw)':<10} | {'zStd(Wtd)':<10} | {'Binned(Sm)':<10} | {'Binned(Unsm)':<12}")
-    print("-" * 80)
+    print(f"{'Bin':<12} | {'GeoEnh(Sm)':<10} | {'GeoEnh(Unsm)':<12} | {'zStd(Unw)':<10} | {'zStd(Wtd)':<10} | {'Binned(Sm)':<10} | {'Binned(Unsm)':<12}")
+    print("-" * 100)
     for key, stats in results.items():
         print(f"{key:<12} | "
-              f"{stats.get('geo_enhancement', 1.0):.4f} | "
-              f"{stats.get('z_std_ratio', 1.0):.4f} | "
-              f"{stats.get('z_std_ratio_weighted', 1.0):.4f} | "
-              f"{stats.get('z_std_ratio_binned', 1.0):.4f} | "
+              f"{stats.get('geo_enhancement', 1.0):.4f}     | "
+              f"{stats.get('geo_enhancement_unsmoothed', 1.0):.4f}       | "
+              f"{stats.get('z_std_ratio', 1.0):.4f}     | "
+              f"{stats.get('z_std_ratio_weighted', 1.0):.4f}     | "
+              f"{stats.get('z_std_ratio_binned', 1.0):.4f}     | "
               f"{stats.get('z_std_ratio_binned_unsmoothed', 1.0):.4f}")
 
 
