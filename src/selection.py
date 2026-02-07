@@ -355,11 +355,7 @@ def load_and_filter_catalog():
         (gal_cat['Re'] < cs['re_max']) & (gal_cat['Re'] > cs['re_min']) &
         (gal_cat['sersic_n'] < cs['sersic_max']) & (gal_cat['sersic_n'] > cs['sersic_min'])
     ].reset_index(drop=True).astype(np.float64)
-
-    cat_area = cs['cat_area']
-    n_degree2 = gal_cat.shape[0] / cat_area
-    print(f"Number density: {n_degree2 / 60**2:.2f} gal/arcmin^2")
-    return gal_cat, n_degree2
+    return gal_cat
 
 
 def load_system_maps():
@@ -524,7 +520,7 @@ def get_binning_weights(df, bin_edges):
     return weights
 
 
-def simulate_and_classify_chunked(gal_cat, n_degree2, z, edges):
+def simulate_and_classify_chunked(gal_cat, z, edges):
     """
     Memory-efficient simulation and classification. 
     Filters non-detections immediately to save 90%+ memory.
@@ -588,11 +584,13 @@ def simulate_and_classify_chunked(gal_cat, n_degree2, z, edges):
             # CRITICAL: Keep only detections to save memory
             block_cla = block_cla[block_cla['detection'] > DETECTION_THRESHOLD].copy()
             
-            # Drop unnecessary columns to save memory before saving to disk
+            # Keep all columns needed by downstream photo-z, MagLim, and stats.
+            # !CAREFUL: only part of columns are kept to save memory, while it can lead to bug if some columns are missing
             keep_cols = [
                 'pix_idx_input_p', 'redshift_input_p', 'detection',
-                'r_input_p', 'Re_input_p', 'psf_fwhm_input_p', 'pixel_rms_input_p',
-                'zero_point_input_p', 'pixel_size_input_p'
+                'r_input_p', 'Re_input_p', 'sersic_n_input_p', 'axis_ratio_input_p',
+                'psf_fwhm_input_p', 'pixel_rms_input_p', 'zero_point_input_p',
+                'pixel_size_input_p', 'moffat_beta_input_p'
             ]
             block_cla = block_cla[[c for c in keep_cols if c in block_cla.columns]].copy()
             
@@ -953,9 +951,9 @@ def main():
     else:
         if not os.path.exists(OUTPUT_PREDS):
              print(f"Predictions file {OUTPUT_PREDS} not found. Running simulation...")
-        gal_cat, n_degree2 = load_and_filter_catalog()
+        gal_cat = load_and_filter_catalog()
         
-        chunk_files, psf_hp_map, SEEN_idx, sim_truth = simulate_and_classify_chunked(gal_cat, n_degree2, z=z, edges=edges)
+        chunk_files, psf_hp_map, SEEN_idx, sim_truth = simulate_and_classify_chunked(gal_cat, z=z, edges=edges)
         
         # Consolidation of detected galaxies (ONLY detected, so much smaller)
         print(f"Re-assembling {len(chunk_files)} detected-only chunks...")

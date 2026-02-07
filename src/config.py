@@ -69,14 +69,13 @@ SYSTEMATICS_CONFIG = {
 # Initial input catalog filters
 CATALOG_SETTINGS = {
     'mag_min': 0,
-    'mag_max': 25,
+    'mag_max': 28,
     're_min': 0.01,
     're_max': 5.0,
     'ba_min': 0.05,
     'ba_max': 1.0,
     'sersic_min': 0.5,
     'sersic_max': 6.0,
-    'cat_area': 5.97, # sq. degree of the input catalog
 }
 
 # Nominal observation conditions (used as baseline)
@@ -86,7 +85,7 @@ OBS_CONDITIONS = {
     'psf_fwhm_nominal': 0.6,
     'moffat_beta': 2.4,
     'pixel_rms_nominal': 6.0,
-    'detec_mag_bound': 26.0,
+    'detec_mag_bound': 27.0,
 }
 
 # Photo-z modeling and Tomographic Binning
@@ -97,15 +96,15 @@ PHOTOZ_PARAMS = {
     'm_ref': 21,           # Reference magnitude
     'rms_ref': 12.0,       # Reference noise level
     'psf_fwhm_ref': 0.6,   # Reference PSF seeing
-    'maglim0': 2,          # MagLim slope
-    'maglim1': 20.5,       # MagLim intercept
+    'maglim0': 4,          # MagLim slope
+    'maglim1': 19,       # MagLim intercept
     'maglim2': 16,         # Bright-end MagLim cut
     'snr_min': 0,          # Minimum SNR for len selection
 }
 
 # General Analysis & Smoothing
 ANALYSIS_SETTINGS = {
-    'z_bins': 30,
+    'z_bins': 100,
     'z_min': 0.0,
     'z_max': 2.0,
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],
