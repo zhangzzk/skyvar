@@ -28,10 +28,6 @@ except ImportError:
     import config
     import plotting as plt_nz
 
-# Add paths to sys.path
-if config.CODE_SRC not in sys.path:
-    sys.path.append(config.CODE_SRC)
-
 # --- Core Functions (from generate_mocksys.py) ---
 
 def lon_diff(lon1, lon2):

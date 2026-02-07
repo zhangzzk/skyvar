@@ -14,7 +14,6 @@ SIM_SETTINGS = {
 }
 
 # External library paths
-CODE_SRC = '/path/to/external/codes/src'
 BLENDING_EMULATOR_DIR = '/path/to/blending_emulator'
 
 # IO Directories
