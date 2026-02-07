@@ -14,7 +14,6 @@ SIM_SETTINGS = {
 }
 
 # External library paths
-CODE_SRC = '/home/z/Zekang.Zhang/tiaogeng/codes/src'
 BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
 
 # IO Directories

@@ -46,16 +46,12 @@ except ImportError:
     import plotting as plt_nz
 
 # Add paths to sys.path
-CODE_SRC = config.CODE_SRC
 BLENDING_EMULATOR_DIR = config.BLENDING_EMULATOR_DIR
-for path in [CODE_SRC, BLENDING_EMULATOR_DIR]:
-    if path not in sys.path:
-        sys.path.append(path)
+if BLENDING_EMULATOR_DIR not in sys.path:
+    sys.path.append(BLENDING_EMULATOR_DIR)
 
 # Custom imports after sys.path update
 try:
-    import glass_mock
-    import generate_mocksys
     import nz_utils
     from cosmic_toolbox import arraytools as at
 except ImportError as e:
