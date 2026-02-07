@@ -6,7 +6,7 @@ import numpy as np
 # ==============================================================================
 # Computational resources and Healpix resolution
 SIM_SETTINGS = {
-    'sys_nside': 32,
+    'sys_nside': 96,
     'n_pop_sample': 500_000,
     'chunk_size': 100_000_000,
     'n_jobs': -1,  # Parallel processing threads (-1 uses all available)
@@ -14,20 +14,20 @@ SIM_SETTINGS = {
 }
 
 # External library paths
-CODE_SRC = '/home/z/Zekang.Zhang/tiaogeng/codes/src'
-BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
+CODE_SRC = '/path/to/external/codes/src'
+BLENDING_EMULATOR_DIR = '/path/to/blending_emulator'
 
 # IO Directories
-BASE_DIR = '/home/z/Zekang.Zhang/nz_variation/'
-PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
+BASE_DIR = './' 
+PROJECT_DATA_DIR = '/path/to/project/data/'
 
 PATHS = {
-    'gal_cat': os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
+    'gal_cat': "/path/to/catalogue/f24_0_r_ucat.gal.cat",
     'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside']}.fits"),
-    'model_json': "/home/z/Zekang.Zhang/optuna_study/models/classification_model_f24_rescaled_neighbor.json",
-    'boundary_npy': "/home/z/Zekang.Zhang/optuna_study/models/train_boundary_f24_cla_neighbor.npy",
-    'output_preds': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/mock_sys_preds_{SIM_SETTINGS['sys_nside']}_full_{SIM_SETTINGS['n_pop_sample']}.feather"),
-    'output_fits_template': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds/sys_{}_{}_nz_bins/{}.fits"),
+    'model_json': "/path/to/models/classification_model.json",
+    'boundary_npy': "/path/to/models/train_boundary.npy",
+    'output_preds': f"/path/to/output/mock_sys_preds_{SIM_SETTINGS['sys_nside']}_full_{SIM_SETTINGS['n_pop_sample']}.feather",
+    'output_fits_template': "/path/to/output/sys_{}_{}_nz_bins/{}.fits",
 }
 
 # ==============================================================================
@@ -110,7 +110,7 @@ ANALYSIS_SETTINGS = {
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],
     'smoothing_sigma_dz': 0.1,
     'smooth_nz': True,      # Whether to smooth n(z) distributions
-    'load_preds': True,     # If True, load existing feather file instead of re-simulating
+    'load_preds': False,     # If True, load existing feather file instead of re-simulating
 }
 
 STATS_PARAMS = {

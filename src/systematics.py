@@ -6,7 +6,7 @@ This module provides classes and functions for generating mock systematic maps.
 Copyright Claim:
 The core geometric functions (gaussian_2d, lon_diff, lon_sum) and the 'tiles' class 
 are adapted from the 'tiaogeng' project (tiaogeng/codes/src/generate_mocksys.py) 
-by Zekang Zhang and collaborators.
+by project contributors.
 """
 
 import os
