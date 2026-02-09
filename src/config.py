@@ -4,35 +4,36 @@ import numpy as np
 # ==============================================================================
 # 1. GLOBAL SETTINGS & PATHS
 # ==============================================================================
-# Computational resources and Healpix resolution
+# Compute resources and HEALPix resolution.
 SIM_SETTINGS = {
-    'sys_nside': 32,
-    'n_pop_sample': 500_000,
-    'chunk_size': 100_000_000,
-    'n_jobs': -1,  # Parallel processing threads (-1 uses all available)
-    'detection_threshold': 0.2, # Probability threshold for galaxy detection
+    'sys_nside_sim': 512,     # High-res nside for simulated maps.
+    'sys_nside_stats': 256,   # Nside used when grouping pixel-level statistics.
+    'n_pop_sample': 200_000,  # Number of simulated galaxies per sim pixel.
+    'chunk_size': 250_000_000,
+    'n_jobs': -1,  # Parallel workers (-1 uses all available).
+    'detection_threshold': 0.2, # Detection-probability threshold.
 }
 
-# External library paths
+# External library paths.
 BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
 
-# IO Directories
-BASE_DIR = '/home/z/Zekang.Zhang/nz_variation/'
+# I/O directories.
+BASE_DIR = '/home/z/Zekang.Zhang/skyvar/'
 PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
 
 PATHS = {
     'gal_cat': os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
-    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside']}.fits"),
+    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside_sim']}.fits"),
     'model_json': "/home/z/Zekang.Zhang/optuna_study/models/classification_model_f24_rescaled_neighbor.json",
     'boundary_npy': "/home/z/Zekang.Zhang/optuna_study/models/train_boundary_f24_cla_neighbor.npy",
-    'output_preds': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/mock_sys_preds_{SIM_SETTINGS['sys_nside']}_full_{SIM_SETTINGS['n_pop_sample']}.feather"),
+    'output_preds': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/mock_sys_preds_sim{SIM_SETTINGS['sys_nside_sim']}_full_{SIM_SETTINGS['n_pop_sample']}.feather"),
     'output_fits_template': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds/sys_{}_{}_nz_bins/{}.fits"),
 }
 
 # ==============================================================================
 # 2. SYSTEMATICS CONFIGURATION (systematics.py)
 # ==============================================================================
-# Parameters for generating mock systematic maps (Noise, PSF, Galactic etc.)
+# Parameters used to generate mock systematics maps.
 SYSTEMATICS_CONFIG = {
     'footprint': {
         'ra_range': [140, 240],
@@ -42,16 +43,16 @@ SYSTEMATICS_CONFIG = {
         'size_deg': 1.0,
     },
     'noise': {
-        'mu0': 6.0,        # global mean pixel noise
-        'sigma_tile': 0.8, # tile-to-tile scatter
-        'sigma_pix': 0.0   # small pixel-level jitter
+        'mu0': 6.0,        # Global mean pixel noise.
+        'sigma_tile': 0.8, # Tile-to-tile scatter.
+        'sigma_pix': 0.0   # Small pixel-level jitter.
     },
     'psf': {
-        'mu0': 0.7,           # global baseline (median seeing)
-        'sigma_tile': 0.07,   # scatter in mean PSF across tiles
-        'Abar': -0.08,        # mean intra-tile amplitude
-        'sigma_A': 0.04,      # scatter of amplitude across tiles
-        'sigma_pix': 0.00,    # small pixel-level noise
+        'mu0': 0.7,           # Global baseline (median seeing).
+        'sigma_tile': 0.07,   # Scatter in mean PSF across tiles.
+        'Abar': -0.08,        # Mean intra-tile amplitude.
+        'sigma_A': 0.04,      # Scatter of intra-tile amplitude.
+        'sigma_pix': 0.00,    # Small pixel-level noise.
         'xmean_fluc': 0.15,
         'ymean_fluc': 0.15,
         'covxx_mean': 10,
@@ -65,7 +66,7 @@ SYSTEMATICS_CONFIG = {
 # ==============================================================================
 # 3. SELECTION & PHOTO-Z CONFIGURATION (selection.py)
 # ==============================================================================
-# Initial input catalog filters
+# Baseline input-catalog filters.
 CATALOG_SETTINGS = {
     'mag_min': 0,
     'mag_max': 28,
@@ -77,47 +78,47 @@ CATALOG_SETTINGS = {
     'sersic_max': 6.0,
 }
 
-# Nominal observation conditions (used as baseline)
+# Nominal observation conditions (baseline values).
 OBS_CONDITIONS = {
     'pixel_size': 0.2,
     'zero_point': 30.0,
     'psf_fwhm_nominal': 0.6,
     'moffat_beta': 2.4,
     'pixel_rms_nominal': 6.0,
-    'detec_mag_bound': 27.0,
+    'detec_mag_bound': 26.0, # Only brighter galaxies are used as primaries.
 }
 
-# Photo-z modeling and Tomographic Binning
+# Photo-z model and tomographic binning.
 PHOTOZ_PARAMS = {
-    'sigma0': 0.038,       # Base scatter at m_ref
-    'sigma_min': 0.02,     # Minimum scatter floor
-    'alpha': 0.4,          # Magnitude scaling power
-    'm_ref': 21,           # Reference magnitude
-    'rms_ref': 12.0,       # Reference noise level
-    'psf_fwhm_ref': 0.6,   # Reference PSF seeing
-    'maglim0': 4,          # MagLim slope
-    'maglim1': 19,       # MagLim intercept
-    'maglim2': 16,         # Bright-end MagLim cut
-    'snr_min': 0,          # Minimum SNR for len selection
+    'sigma_pho': 0.0376,       # Base scatter at m_ref.
+    'sigma_int': 0.0212,     # Minimum scatter floor.
+    'alpha': 0.4,          # Magnitude-scaling power.
+    'm_ref': 21,           # Reference magnitude.
+    'rms_ref': 6.0,       # Reference noise level.
+    'psf_fwhm_ref': 0.7,   # Reference PSF seeing.
+    'maglim0': 4,          # MagLim slope.
+    'maglim1': 19,         # MagLim intercept.
+    'maglim2': 17,         # Bright-end MagLim cut.
+    'snr_min': 0,          # Minimum SNR for lens selection.
 }
 
-# General Analysis & Smoothing
+# General analysis and smoothing settings.
 ANALYSIS_SETTINGS = {
-    'z_bins': 100,
+    'z_bins': 60,
     'z_min': 0.0,
     'z_max': 2.0,
     'tomo_bin_edges': [0.2, 0.4, 0.55, 0.7, 0.85, 0.95, 1.05],
-    'smoothing_sigma_dz': 0.1,
-    'smooth_nz': True,      # Whether to smooth n(z) distributions
-    'load_preds': True,     # If True, load existing feather file instead of re-simulating
+    'smoothing_sigma_dz': 0.05,
+    'smooth_nz': False,      # Smooth n(z) distributions.
+    'load_preds': True,    # Load cached predictions instead of re-simulating.
 }
 
 STATS_PARAMS = {
-    'min_count': 100,       # Minimum galaxies per pixel for valid statistics
+    'min_count': 100,       # Minimum galaxies per pixel for valid stats.
 }
 
 # ==============================================================================
-# 4. CLUSTERING & COSMOLOGY CONFIGURATION (clustering.py / variation.py)
+# 4. CLUSTERING & COSMOLOGY CONFIGURATION
 # ==============================================================================
 COSMO_PARAMS = {
     'Omega_c': 0.25,

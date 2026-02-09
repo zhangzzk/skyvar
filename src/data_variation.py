@@ -21,8 +21,8 @@ except ImportError:
     from clustering import ClusteringEnhancement
 
 
-# Constants from config
-SYS_NSIDE = config.SIM_SETTINGS['sys_nside']
+# Constants from config.
+SYS_NSIDE = config.SIM_SETTINGS['sys_nside_stats']
 OUTPUT_PREDS = config.PATHS['output_preds']
 N_POP_SAMPLE = config.SIM_SETTINGS['n_pop_sample']
 
@@ -32,7 +32,7 @@ def main() -> None:
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
     
-    # 1. Regenerate Statistics from Predictions (consistent with new binning)
+    # 1) Regenerate statistics from saved predictions.
     print("Loading predictions from catalog to regenerate statistics...")
     preds_path = config.PATHS['output_preds']
     if not os.path.exists(preds_path):
@@ -42,10 +42,7 @@ def main() -> None:
     print(f"Loading existing predictions from {OUTPUT_PREDS}...")
     cla_cat = pd.read_feather(OUTPUT_PREDS)
     
-    # print("Processing loaded catalog (photo-z, cuts)...")
-    # cla_cat = sel.process_classified_catalog(cla_cat)
-    
-    # Determine redshift bins from data
+    # Determine redshift bins from the loaded catalog.
     print("Determining consistent redshift bins from loaded catalog...")
     z_mid, edges = utils.get_redshift_bins(cla_cat['redshift_input_p'])
     
@@ -56,12 +53,10 @@ def main() -> None:
 
     n_maps = full_stats['dndzs'].T
     nbar = full_stats['dndz_det']
-    # nbar = n_maps.mean(axis=1) # Use map mean for consistency with variance calculation
-    
-    # Redshift std ratio from stats
+    # Redshift std-ratio from stats.
     z_std_ratio = full_stats.get('z_std_ratio', 1.0)
 
-    # 2. Setup Cosmology and Clustering
+    # 2) Set up cosmology and clustering model.
     cosmo = ccl.Cosmology(
         Omega_c=config.COSMO_PARAMS['Omega_c'], 
         Omega_b=config.COSMO_PARAMS['Omega_b'], 
@@ -79,10 +74,9 @@ def main() -> None:
 
     enhancer = ClusteringEnhancement(cosmo, ell_max=ell_max, ell_min=2)
     
-    # 3. Compute Clustering Enhancement
+    # 3) Compute clustering enhancement.
     print("Computing clustering enhancement (wtheta mode)...")
-    # Note: For real data, we must enable shot noise subtraction if not already handled.
-    # variation.py passes n_samples to compute_enhancement_from_maps.
+    # Note: for real data, include shot-noise treatment if needed.
     result = enhancer.compute_enhancement_from_maps(
         n_maps=n_maps,
         nbar=nbar,
@@ -94,24 +88,23 @@ def main() -> None:
         weights=full_stats['frac_pix'],
     )
 
-    # 4. Compute Variance Mode Calculation (for comparison)
-    # We need band-limited maps for fair variance comparison
-    # to match the effective filtering occurring in wtheta mode (anafast).
+    # 4) Compute variance-mode estimate for comparison.
+    # Use band-limited maps to match wtheta-mode filtering.
     print("Computing clustering enhancement (variance mode)...")
     lmax_map = 3 * SYS_NSIDE - 1
     n_maps_bl = np.zeros_like(n_maps)
     npix = hp.nside2npix(SYS_NSIDE)
     
     for i in range(len(n_maps)):
-        # Reconstruct full map for SHT
+        # Reconstruct full map for spherical-harmonic transforms.
         m_full = np.zeros(npix)
         m_full[seen_idx] = n_maps[i]
         
-        # Band-limit (smooth)
+        # Band-limit (smooth).
         alms = hp.map2alm(m_full, lmax=lmax_map)
         m_bl = hp.alm2map(alms, nside=SYS_NSIDE)
         
-        # Extract seen pixels back
+        # Keep only footprint pixels.
         n_maps_bl[i] = m_bl[seen_idx]
     
     result_var = enhancer.compute_enhancement_from_maps(
@@ -125,17 +118,17 @@ def main() -> None:
         weights=full_stats['frac_pix'],
     )
 
-    # 5. Calculate Geometric Enhancement
+    # 5) Calculate geometric enhancement.
     geo_enhancement = utils.calculate_geometric_enhancement(
         z_mid, n_maps.T, nbar, frac_pix=full_stats['frac_pix']
     )
 
-    # 6. Print Summary
+    # 6) Print summary.
     print(f"Geometric Enhancement Factor: {geo_enhancement:.6f}")
     print(f"Redshift-based std Ratio:   {z_std_ratio:.6f}")
     print(f"Measured Clust. Enhanc (theta_min): {1.0 + result.delta_w[0] / result.w_model[0]:.6f}")
 
-    # Diagnostic: matrix weighted enhancement
+    # Diagnostic: matrix-weighted enhancement.
     weights = nbar * result.dz
     w_mat0 = result.w_mat[:, :, 0]
     w_estim = np.einsum("i,j,ij->", weights, weights, w_mat0) / (np.sum(weights)**2)
@@ -146,14 +139,14 @@ def main() -> None:
     dw_estim = np.sum(w_sel_density * xi_diag0)
     print(f"Binned Predicted Factor (theta_min): {1.0 + dw_estim / w_estim:.6f}")
 
-    # Diagnostic: Check decoherence at theta_min
+    # Diagnostic: check decoherence at theta_min.
     peak_idx = np.argmax(result.nbar)
     if result.w_selection is not None:
         w_sel_0 = result.w_selection[peak_idx, 0] / (result.dz[peak_idx]**2)
         var_peak = np.average((n_maps[peak_idx] - nbar[peak_idx])**2, weights=full_stats['frac_pix'])
         print(f"Decoherence Factor (z={z_mid[peak_idx]:.2f}): w_sys(theta_min) / var_sys = {w_sel_0 / var_peak:.4f}")
 
-    # 7. Plotting
+    # 7) Plot results.
     plt_nz.plot_nz_variations(z_mid, n_maps, nbar, output_dir, title="n(z) Variations (Data)", filename="nz_distribution_data.png")
     plt_nz.plot_model_vs_ccl(result, cosmo, nbar, z_mid, output_dir, filename="w_model_vs_ccl_data.png")
     plt_nz.plot_selection_wtheta(result, 60.0 * result.theta_deg, output_dir, filename="selection_wtheta_z_data.png")

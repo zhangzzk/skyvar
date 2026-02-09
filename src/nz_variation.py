@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import pyccl as ccl
+from astropy.io import fits
 
 try:
     from . import selection as sel
@@ -20,6 +21,21 @@ except ImportError:
 
 # Add enhance directory to path to ensure local imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+
+def save_clustering_results_to_fits(all_clustering_results, output_dir, filename="w_true_w_model.fits"):
+    """Save theta, w_model, and w_true for each bin to a multi-HDU FITS file."""
+    output_path = os.path.join(output_dir, filename)
+    hdus = [fits.PrimaryHDU()]
+
+    for key, res in all_clustering_results.items():
+        ext = key.upper()[:40]
+        hdus.append(fits.ImageHDU(np.asarray(res.theta_deg, dtype=np.float64), name=f"{ext}_THETA"))
+        hdus.append(fits.ImageHDU(np.asarray(res.w_model, dtype=np.float64), name=f"{ext}_WMODEL"))
+        hdus.append(fits.ImageHDU(np.asarray(res.w_true, dtype=np.float64), name=f"{ext}_WTRUE"))
+
+    fits.HDUList(hdus).writeto(output_path, overwrite=True)
+    print(f"Saved w_model/w_true curves to {output_path}")
 
 
 
@@ -93,7 +109,7 @@ def main():
             z=stats['z'],
             theta_deg=theta_deg,
             seen_idx=stats['SEEN_idx'],
-            nside=config.SIM_SETTINGS['sys_nside'],
+            nside=config.SIM_SETTINGS['sys_nside_stats'],
             weights=stats['frac_pix']
         )
         
@@ -105,8 +121,8 @@ def main():
     # 3. Consolidated Plotting
     plt_nz.plot_all_comparisons(all_clustering_results, all_geo_factors, output_dir)
     plt_nz.plot_model_diagnostics(all_clustering_results, results_stats, output_dir)
+    save_clustering_results_to_fits(all_clustering_results, output_dir)
 
 
 if __name__ == "__main__":
     main()
-

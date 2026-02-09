@@ -12,25 +12,25 @@ except ImportError:
 
 def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
     """
-    Calculate geometric widths and the geometric enhancement factor.
-    Returns: (geo_width_pix, geo_width_global, enhancement_factor)
+    Compute geometric widths and geometric enhancement.
+    Returns (geo_width_pix, geo_width_global, enhancement_factor).
     """
     if dndzs.ndim == 1:
         dndzs = dndzs[None, :]
         
-    # L2 norms (inverse geometric widths)
+    # L2 norms (inverse geometric widths).
     l2_pix = np.trapezoid(dndzs**2, z, axis=1)
     l2_glob = np.trapezoid(dndz_glob**2, z)
 
     geo_width_pix = np.where(l2_pix > 0, 1.0 / l2_pix, 0.0)
     geo_width_global = 1.0 / l2_glob if l2_glob > 0 else 0.0
 
-    # correction for resolution bias
+    # Optional resolution-bias correction.
     # dz = np.mean(np.diff(z))
     # geo_width_pix = np.sqrt(geo_width_pix**2 + dz**2/12)
     # geo_width_global = np.sqrt(geo_width_global**2 + dz**2/12)
 
-    # Use corrected L2 norms (1/width) for enhancement factor
+    # Optional corrected L2 norms (1/width) for enhancement.
     # l2_pix_corr = np.where(geo_width_pix > 0, 1.0 / geo_width_pix, 0.0)
     # l2_glob_corr = 1.0 / geo_width_global if geo_width_global > 0 else 0.0
 
@@ -41,16 +41,15 @@ def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
 
     enhancement = mean_l2 / l2_glob if l2_glob > 0 else 1.0
     
-    # If input was 1D, return 1D array for geo_width_pix
+    # If input was 1D, return a scalar geo_width_pix.
     if geo_width_pix.size == 1:
         geo_width_pix = geo_width_pix[0]
         
     return geo_width_pix, geo_width_global, enhancement
 
-def calculate_binned_std_ratio(z, dndzs, dndz_glob, frac_pix=None):
+def calculate_binned_std_ratio(z, dndzs, dndz_glob, frac_pix=None, valid_mask=None):
     """
-    Calculate the standard deviation ratio (mean(1/sigma_i) * sigma_all) 
-    using binned n(z) distributions.
+    Compute the binned std-ratio metric: mean(1/sigma_i) * sigma_global.
     """
     if dndzs.ndim == 1:
         dndzs = dndzs[None, :]
@@ -59,6 +58,14 @@ def calculate_binned_std_ratio(z, dndzs, dndz_glob, frac_pix=None):
     _, sig_glob = cal_sigz(dndz_glob, z)
 
     valid = (sig_pix > 0) & np.isfinite(sig_pix)
+    if valid_mask is not None:
+        valid &= np.asarray(valid_mask, dtype=bool)
+    if frac_pix is not None:
+        frac_pix = np.asarray(frac_pix)
+        valid &= np.isfinite(frac_pix) & (frac_pix > 0)
+
+    if not np.isfinite(sig_glob) or sig_glob <= 0:
+        return 1.0
     if not np.any(valid):
         return 1.0
 
@@ -67,14 +74,17 @@ def calculate_binned_std_ratio(z, dndzs, dndz_glob, frac_pix=None):
     if frac_pix is None:
         mean_inv_sig = np.mean(inv_sig)
     else:
-        # Match weight dimensions to valid pixels
+        # Match weight dimensions to valid pixels.
         weights = frac_pix[valid]
         if weights.sum() > 0:
             mean_inv_sig = np.average(inv_sig, weights=weights)
         else:
             mean_inv_sig = np.mean(inv_sig)
 
-    return mean_inv_sig * sig_glob
+    ratio = mean_inv_sig * sig_glob
+    if not np.isfinite(ratio):
+        return 1.0
+    return ratio
 
 def calculate_geometric_enhancement(z, dndzs, dndz_glob, frac_pix=None):
     """Deprecated: use calculate_geometric_stats instead."""
@@ -91,7 +101,7 @@ def e1e2_to_q_phi(e1, e2):
     return q, phi
 
 def kdt_neighbor_finder(pos1, pos2, r_min=0, r_max=10, k=30):
-    """Find neighbors using KDTree."""
+    """Find neighbors with KDTree within [r_min, r_max]."""
     kdt_in = KDTree(pos2)
     dst, ind = kdt_in.query(pos1, k=k, distance_upper_bound=r_max, workers=-1)
 
@@ -110,7 +120,7 @@ def weighted_quantile(x_in, w_in, q):
     else:
         w = np.asarray(w_in)
     
-    # Sort by x
+    # Sort by x before building the weighted CDF.
     s = np.argsort(x)
     x_s = x[s]
     w_s = w[s]
@@ -124,8 +134,8 @@ def weighted_quantile(x_in, w_in, q):
 
 def get_redshift_bins(z_vals, weights=None, n_bins=None, q_lo=0.001, q_hi=0.999):
     """
-    Generate unified redshift bins based on data quantiles.
-    Returns: (z_centers, z_edges)
+    Build redshift bins from config or weighted quantiles.
+    Returns (z_centers, z_edges).
     """
     if n_bins is None:
         try:
@@ -166,8 +176,8 @@ def cal_sigz(dndz,z):
 
 def compute_pixel_histograms(pix_idx, vals, weights, edges, n_pix=None):
     """
-    Compute per-pixel normalized histograms.
-    Returns: (pixel_counts, normalized_hists)
+    Compute per-pixel weighted histograms and normalized n(z).
+    Returns (pixel_counts, normalized_hists).
     """
     vals = np.asarray(vals)
     pix_idx = np.asarray(pix_idx)
@@ -196,8 +206,8 @@ def compute_pixel_histograms(pix_idx, vals, weights, edges, n_pix=None):
 
 def compute_redshift_stats(pix_idx, z_vals, weights, n_pix):
     """
-    Compute global and per-pixel redshift standard deviation.
-    Returns: (std_z_all, std_z_pix, z_std_ratio)
+    Compute global and per-pixel redshift scatter.
+    Returns (std_z_all, std_z_pix, z_std_ratio).
     """
     z_vals = np.asarray(z_vals)
     pix_idx = np.asarray(pix_idx)
@@ -210,7 +220,7 @@ def compute_redshift_stats(pix_idx, z_vals, weights, n_pix):
     mean_z_all = np.average(z_vals, weights=weights)
     std_z_all = np.sqrt(np.average((z_vals - mean_z_all)**2, weights=weights))
     
-    # Per-pixel sums
+    # Per-pixel weighted sums.
     w_sum = np.bincount(pix_idx, weights=weights, minlength=n_pix)
     wz_sum = np.bincount(pix_idx, weights=weights * z_vals, minlength=n_pix)
     wz2_sum = np.bincount(pix_idx, weights=weights * z_vals**2, minlength=n_pix)
@@ -249,8 +259,8 @@ def compute_redshift_stats_from_sums(w_sum_pix, wz_sum_pix, wz2_sum_pix,
     
     active_pix_std = std_z_pix[mask_v]
     
-    # Use the inverse-std ratio formula: mean(1/sigma_i) / (1/sigma_global)
-    # Filter out zero std to avoid division by zero
+    # Inverse-std ratio: mean(1/sigma_i) / (1/sigma_global).
+    # Skip zero-sigma pixels to avoid division by zero.
     valid_std = active_pix_std > 0
     if np.any(valid_std):
         z_std_ratio = np.mean(1.0 / active_pix_std[valid_std]) * std_z_all

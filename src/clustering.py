@@ -25,17 +25,17 @@ class EnhancementResult:
 
 class ClusteringEnhancement:
     """
-    Compute the clustering enhancement due to spatial variance of n(z, theta).
+    Compute clustering enhancement driven by spatial variation in n(z, theta).
 
-    Inputs are binned in redshift. For each bin i:
+    Inputs are redshift-binned. For each bin i:
       n_maps[i, :] = integral of n(z, theta) over [z_i, z_{i+1}]
       nbar[i] = global mean integral over the same bin
 
-    The enhancement is computed as:
+    Enhancement is computed as:
       w_sel(theta, z_i) = <delta n_i(theta1) delta n_i(theta2)> at separation theta
       delta_w(theta) = sum_i dz_i * w_sel(theta, z_i) * w_mat(theta; z_i, z_i)
     
-    The binned model w_model is computed directly using shell summation (user version):
+    The binned model w_model is computed directly from shell summation:
       w_model = Sum_{i,j} (nbar_i*dz_i) * (nbar_j*dz_j) * w_mat(theta; z_i, z_j)
     """
 
@@ -100,11 +100,7 @@ class ClusteringEnhancement:
         nside: int,
         seen_idx: np.ndarray,
     ) -> np.ndarray:
-        """
-        Compute the selection correlation matrix delta_w_nz[i,j] following:
-        delta_w_nz[i,j] = term1 + term2 + term3
-        where term1, term2 are mean shifts and term3 is the angular correlation of fluctuations.
-        """
+        """Compute the selection correlation matrix delta_w_nz[i, j]."""
         n_maps = np.asarray(n_maps, dtype=float)
         nbar = np.asarray(nbar, dtype=float)
         nz = n_maps.shape[0]
@@ -115,10 +111,10 @@ class ClusteringEnhancement:
         fsky = len(seen_idx) / npix if npix > 0 else 0
 
         delta_w_nz = np.zeros((nz, nz, len(theta_rad)))
-        # Mean over pixels for each bin
+        # Mean over pixels for each bin.
         local_means = np.mean(n_maps, axis=1)
 
-        # Precompute alms for term3 efficiency
+        # Precompute spherical-harmonic coefficients for speed.
         alms = []
         for i in range(nz):
             full_delta_map_i = np.zeros(npix)
@@ -166,7 +162,7 @@ class ClusteringEnhancement:
         bias: Optional[np.ndarray] = None,
         nz: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute full [Nz, Nz, Ntheta] matter correlation matrix."""
+        """Compute the full [Nz, Nz, Ntheta] matter-correlation matrix."""
         z = np.asarray(z, dtype=float)
         theta_deg = np.asarray(theta_deg, dtype=float)
 
@@ -205,8 +201,7 @@ class ClusteringEnhancement:
             for i in range(nz_bins)
         ]
 
-        # computing the full cross-correlation, which takes long time
-        # TODO: optimize this later
+        # Full cross-correlation is expensive; optimize later if needed.
         ell = np.arange(self.ell_max + 1, dtype=int)
         for i in range(nz_bins):
             for j in range(i, nz_bins):
@@ -255,7 +250,7 @@ class ClusteringEnhancement:
         else:
             var_n = np.mean((n_maps - nbar[:, None]) ** 2, axis=1)
         
-        # Calculate matter correlation matrix at full resolution (not capped by nside)
+        # Compute matter-correlation matrix at full model resolution.
         w_mat, z_mid, dz = self.matter_correlation_matrix(
             z,
             theta_deg,
@@ -268,19 +263,19 @@ class ClusteringEnhancement:
             raise ValueError("selection_mode must be 'wtheta' or 'variance'.")
 
         print(f"Computing {nz}x{nz} angular expansion terms (anafast matrix)...")
-        # delta_w_matrix has shape (nz, nz, ntheta)
+        # delta_w_matrix shape: (nz, nz, ntheta).
         delta_w_matrix = self.selection_wtheta_from_map(
             n_maps, nbar, theta_deg, nside=nside, seen_idx=seen_idx
         )
         
-        # Apply integration weights dz_i * dz_j
+        # Apply integration weights dz_i * dz_j.
         dz_matrix = dz[:, None] * dz[None, :]
         w_selection = delta_w_matrix * dz_matrix[:, :, None]
         
-        # delta_w(theta) = Sum_{i,j} w_selection[i,j,theta] * w_mat[i,j,theta]
+        # delta_w(theta) = Sum_{i,j} w_selection[i,j,theta] * w_mat[i,j,theta].
         delta_w = np.einsum("ijk,ijk->k", w_selection, w_mat)
         
-        # Calculate w_model using full matrix shell summation (User version)
+        # Compute w_model using full shell-matrix summation.
         weights = nbar * dz
         norm = np.sum(weights)
         if norm > 0:
@@ -302,4 +297,3 @@ class ClusteringEnhancement:
             theta_deg=theta_deg,
             dz=dz,
         )
-

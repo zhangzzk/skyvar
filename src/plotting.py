@@ -100,7 +100,7 @@ def plot_model_vs_ccl(result, cosmo, nbar, z, output_dir, filename="w_model_vs_c
         bias=(z, np.ones_like(z)),
     )
     # Estimate lmax from nside or config if possible, else default
-    lmax = 3 * config.SIM_SETTINGS['sys_nside'] - 1
+    lmax = 3 * config.SIM_SETTINGS['sys_nside_stats'] - 1
     ell = np.arange(lmax + 1, dtype=int)
     cell = ccl.angular_cl(cosmo, gtracer, gtracer, ell)
     w_direct = ccl.correlation(
@@ -254,7 +254,7 @@ def plot_all_comparisons(all_results, geometric_factors, output_dir):
 def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None, ax=None):
     """Plot HEALPix map for seen pixels."""
     if s is None:
-        s = 3*(256.0 / sys_nside)**3
+        s = 5
         s = np.clip(s, 0.1, 100)
 
     n_pix = hp.nside2npix(sys_nside)
@@ -420,7 +420,7 @@ def plot_pixel_std_histograms(results, output_dir):
     n_rows = n_keys
     
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 4.5 * n_rows))
-    sys_nside = config.SIM_SETTINGS['sys_nside']
+    sys_nside = config.SIM_SETTINGS['sys_nside_stats']
     
     for i, k in enumerate(keys):
         stats = results[k]
@@ -850,3 +850,128 @@ def plot_z_distribution_comparison(cla_cat, output_dir, z=None, edges=None):
     plt.savefig(plot_path)
     plt.close()
     print(f"Z-distribution comparison plot saved to {plot_path}")
+
+
+# ============================================================================
+# Density Variation Plots (density_variation.py)
+# ============================================================================
+
+def plot_density_histograms(values_list, labels, save_path=None):
+    """Plot side-by-side histograms of density map values.
+
+    Parameters
+    ----------
+    values_list : list of arrays
+        Values to histogram (one panel per entry).
+    labels : list of str
+        Axis labels for each panel.
+    save_path : str, optional
+        Path to save figure.
+    """
+    n = len(values_list)
+    fig, axes = plt.subplots(1, n, figsize=(4 * n, 3))
+    if n == 1:
+        axes = [axes]
+
+    for ax, vals, label in zip(axes, values_list, labels):
+        finite = np.asarray(vals)
+        finite = finite[np.isfinite(finite)]
+        ax.hist(finite, bins=50, edgecolor='none', alpha=0.8)
+        ax.set_xlabel(label)
+        ax.set_ylabel("Count")
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Density histograms saved to {save_path}")
+    plt.close()
+
+
+def plot_selection_cls(ell, cl, save_path=None):
+    """Plot angular power spectrum of the selection fraction fluctuation.
+
+    Parameters
+    ----------
+    ell : array
+        Multipole moments.
+    cl : array
+        Angular power spectrum C_l.
+    save_path : str, optional
+        Path to save figure.
+    """
+    plt.figure(figsize=(7, 5))
+    mask = ell > 0
+    plt.plot(ell[mask], ell[mask] * (ell[mask] + 1) * cl[mask] / (2 * np.pi),
+             lw=1.5)
+    plt.xlabel(r"$\ell$")
+    plt.ylabel(r"$\ell(\ell+1) C_\ell / 2\pi$")
+    plt.title("Selection Fraction Angular Power Spectrum")
+    plt.xscale("log")
+    plt.yscale("log")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"Selection C_l plot saved to {save_path}")
+    plt.close()
+
+
+def plot_wtheta_comparison(wtheta_results, w_theory=None, save_path=None):
+    """Plot w(theta) comparison between different random catalog strategies.
+
+    Shows the selection-induced false clustering signal and the
+    effectiveness of organized randoms in removing it.
+
+    Parameters
+    ----------
+    wtheta_results : dict
+        Output of density_variation.measure_wtheta() containing
+        theta, w_ur, w_or, w_orig and their covariances.
+    w_theory : array, optional
+        Theoretical w(theta) prediction.
+    save_path : str, optional
+        Path to save figure.
+    """
+    theta = wtheta_results['theta']
+
+    plt.figure(figsize=(8, 6))
+
+    # No selection (baseline)
+    cov_orig = wtheta_results['cov_orig']
+    err_orig = theta * np.sqrt(np.diag(cov_orig))
+    plt.errorbar(theta, theta * wtheta_results['w_orig'],
+                 yerr=err_orig, fmt='.', label='No selection',
+                 capsize=2, ms=5)
+
+    # Uniform randoms (contains selection bias)
+    cov_ur = wtheta_results['cov_ur']
+    err_ur = theta * np.sqrt(np.diag(cov_ur))
+    plt.errorbar(theta * 1.02, theta * wtheta_results['w_ur'],
+                 yerr=err_ur, fmt='.', label='Uniform randoms',
+                 capsize=2, ms=5)
+
+    # Organized randoms (selection bias removed)
+    cov_or = wtheta_results['cov_or']
+    err_or = theta * np.sqrt(np.diag(cov_or))
+    plt.errorbar(theta * 1.04, theta * wtheta_results['w_or'],
+                 yerr=err_or, fmt='.', label='Organized randoms',
+                 capsize=2, ms=5)
+
+    # Theory
+    if w_theory is not None:
+        plt.plot(theta, theta * w_theory, 'k-', lw=1.5,
+                 label='Theory (b=1)')
+
+    plt.xscale('log')
+    plt.xlabel(r"$\theta$ [arcmin]")
+    plt.ylabel(r"$\theta \cdot w(\theta)$")
+    plt.title("Angular Correlation: Density Variation")
+    plt.legend(fontsize=9)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150)
+        print(f"w(theta) comparison plot saved to {save_path}")
+    plt.close()

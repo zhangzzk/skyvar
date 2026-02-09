@@ -13,26 +13,26 @@ from scipy.stats import norm
 import xgboost as xgb
 import gc
 import psutil
+import time
 
 
 def get_memory_usage():
-    """Return memory usage of current process in GB."""
+    """Return the current process memory usage in GB."""
     return psutil.Process().memory_info().rss / 1e9
 
 def apply_post_detection_cuts(df):
-    """Apply all post-detection filters (e.g., SNR, magnitude, etc.)."""
+    """Apply optional cuts after detection."""
     if df is None or df.empty:
         return df
         
     snr_thresh = config.ANALYSIS_SETTINGS.get('post_det_snr_thresh', 0.0)
     if snr_thresh > 0:
-        # Check for both possible column names
+        # Support both legacy and current column names.
         snr_col = 'snr_input_p' if 'snr_input_p' in df.columns else 'snr'
         if snr_col in df.columns:
             df = df[df[snr_col] > snr_thresh]
             
-    # Add future cuts here
-    # Example: df = df[df['redshift'] < 2.5]
+    # Add extra post-detection cuts here if needed.
     
     return df
 
@@ -45,20 +45,21 @@ except ImportError:
     import config
     import plotting as plt_nz
 
-# Add paths to sys.path
+# Make external emulator modules importable.
 BLENDING_EMULATOR_DIR = config.BLENDING_EMULATOR_DIR
 if BLENDING_EMULATOR_DIR not in sys.path:
     sys.path.append(BLENDING_EMULATOR_DIR)
 
-# Custom imports after sys.path update
+# Import external modules after updating sys.path.
 try:
     import nz_utils
     from cosmic_toolbox import arraytools as at
 except ImportError as e:
     print(f"Warning: Could not import some custom modules: {e}")
 
-# Constants from config
-SYS_NSIDE = config.SIM_SETTINGS['sys_nside']
+# Constants loaded from config.
+SYS_NSIDE_SIM = config.SIM_SETTINGS['sys_nside_sim']
+SYS_NSIDE_STATS = config.SIM_SETTINGS['sys_nside_stats']
 N_POP_SAMPLE = config.SIM_SETTINGS['n_pop_sample']
 CHUNK_SIZE = config.SIM_SETTINGS['chunk_size']
 N_JOBS = config.SIM_SETTINGS['n_jobs']
@@ -68,18 +69,46 @@ MODEL_JSON = config.PATHS['model_json']
 OUTPUT_PREDS = config.PATHS['output_preds']
 OUTPUT_FITS_TEMPLATE = config.PATHS['output_fits_template']
 DETECTION_THRESHOLD = config.SIM_SETTINGS['detection_threshold']
-NPIX = hp.nside2npix(SYS_NSIDE)
+NPIX = hp.nside2npix(SYS_NSIDE_STATS)
 PHOTOZ_PARAMS = config.PHOTOZ_PARAMS
 
-def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=None):
-    """Compute per-pixel normalized n(z) and sum_num using vectorized operations."""
+
+def downcast_float64_to32(df: pd.DataFrame) -> pd.DataFrame:
+    """Downcast float64 columns to float32 to reduce memory use."""
+    float64_cols = df.select_dtypes(include=["float64"]).columns
+    if len(float64_cols) > 0:
+        df.loc[:, float64_cols] = df.loc[:, float64_cols].astype(np.float32)
+    return df
+
+def map_pix_sim_to_stats(pix_idx_sim, nside_sim, nside_stats):
+    """Map HEALPix pixel IDs from the simulation grid to the stats grid."""
+    pix_idx_sim = np.asarray(pix_idx_sim, dtype=np.int64)
+    if int(nside_sim) == int(nside_stats):
+        return pix_idx_sim.copy()
+
+    unique_sim, inv = np.unique(pix_idx_sim, return_inverse=True)
+    ra_u, dec_u = hp.pix2ang(int(nside_sim), unique_sim, lonlat=True)
+    unique_stats = hp.ang2pix(int(nside_stats), ra_u, dec_u, lonlat=True).astype(np.int64)
+    return unique_stats[inv]
+
+
+def get_input_counts_per_stats_pixel(seen_idx_sim, nside_sim, nside_stats, n_pop_sample):
+    """Return total simulated input counts per stats pixel."""
+    n_pix_stats = hp.nside2npix(int(nside_stats))
+    pix_stats = map_pix_sim_to_stats(seen_idx_sim, nside_sim, nside_stats)
+    n_sim_per_stats = np.bincount(pix_stats, minlength=n_pix_stats).astype(np.int64)
+    return n_sim_per_stats * int(n_pop_sample)
+
+
+def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=None, pix_col="pix_idx_input_p", n_pix=None):
+    """Compute per-pixel normalized n(z) and effective counts with vectorized ops."""
     z = np.asarray(z)
     edges = np.asarray(edges)
     dz = np.diff(edges)
 
     n_z = len(z)
 
-    # Filter and Prepare Weights
+    # Apply optional row filter and build weights.
     if post_cut is not None:
         df_cut = sys_cat.loc[post_cut(sys_cat)].copy()
     else:
@@ -90,28 +119,30 @@ def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=No
     else:
         df_cut["_w"] = df_cut["detection"] * df_cut[weight_col]
 
-    # Vectorized 2D Histogram
-    pix_idx = df_cut["pix_idx_input_p"].values
+    # Build per-pixel redshift histograms.
+    if n_pix is None:
+        n_pix = NPIX
+    pix_idx = df_cut[pix_col].values
 
     pixel_counts, hist_raw = utils.compute_pixel_histograms(
         pix_idx=pix_idx,
         vals=df_cut["redshift_input_p"].values,
         weights=df_cut["_w"].values,
         edges=edges,
-        n_pix=NPIX
+        n_pix=n_pix
     )
     sum_num = pixel_counts.sum(axis=1)
     
-    # Calculate global and per-pixel standard deviation
+    # Compute global and per-pixel redshift scatter.
     std_z_all, std_z_pix, z_std_ratio = utils.compute_redshift_stats(
         pix_idx=pix_idx,
         z_vals=df_cut["redshift_input_p"].values,
         weights=df_cut["_w"].values,
-        n_pix=NPIX
+        n_pix=n_pix
     )
 
     label = weight_col if weight_col else "full"
-    # Inverse-std ratio (Weighted): average(1/sigma_i, weights=w_i) / (1/sigma_global)
+    # Weighted inverse-std ratio: <1/sigma_i>_w / (1/sigma_global).
     mask_v = (sum_num > 0) & (std_z_pix > 0)
     mean_std_z_pix_unweighted = np.mean(std_z_pix[sum_num > 0]) if np.any(sum_num > 0) else 0.0
     
@@ -126,19 +157,19 @@ def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=No
         f"mean_std_pix={mean_std_z_pix_unweighted:.6f})"
     )
 
-    out = pd.DataFrame(hist_raw, index=np.arange(NPIX))
+    out = pd.DataFrame(hist_raw, index=np.arange(n_pix))
     out.columns = np.arange(n_z)
     out["sum_num"] = sum_num
     out["std_z_pix"] = std_z_pix
     out.attrs['z_std_ratio'] = z_std_ratio
     out.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
 
-    # Global Truth; If sim_truth is provided use it, otherwise fallback to sys_cat
+    # Use provided simulation truth when available; otherwise estimate from input data.
     if sim_truth is not None:
         dndz_in = sim_truth['dndz_in']
         num_in = sim_truth['num_in']
     else:
-        # This assumes sys_cat contains all input galaxies (fallback)
+        # Fallback assumes sys_cat contains the full input population.
         dndz_in = np.histogram(sys_cat["redshift_input_p"], bins=edges, density=True)[0]
         num_in = sys_cat.shape[0] 
 
@@ -177,36 +208,6 @@ def smooth_nz_preserve_moments(
       - L2 is enforced by a 1D power transform (stable, no tail explosion).
       - Optional taper enforces n(0)=0 by construction.
       - Gaussian smoothing uses zero-padding at boundaries.
-
-    Parameters
-    ----------
-    z : (Nz,) array, strictly increasing
-    nz : (Nz,) or (N, Nz) array
-    sigma_dz : float
-        Gaussian smoothing sigma in z-units.
-    preserve_norm : bool
-        If True, enforce ∫g = ∫n. Recommended for PDFs.
-        If False, still enforces mean(g)=mean(n) and ∫g^2=∫n^2 but leaves ∫g free.
-    boundary_taper : bool
-        If True, multiply by w(z) with w(0)=0.
-    taper_scale_factor : float
-        z0 = taper_scale_factor * sigma_dz
-    taper_power : float
-        w(z) = 1 - exp(-((z-0)/z0)^p), z>=0
-    outer_iter : int
-        Alternating-projection iterations (usually 4–8 is enough).
-    mean_bracket : float
-        Search bracket for the mean-tilt parameter alpha in [-mean_bracket, +mean_bracket].
-    p_bracket : (float, float)
-        Search bracket for power p.
-    tol_mean, tol_l2 : float
-        Tolerances for constraints.
-    eps : float
-        Small floor for numerical stability.
-
-    Returns
-    -------
-    g : same shape as nz
     """
     z = np.asarray(z, dtype=float)
     nz = np.asarray(nz, dtype=float)
@@ -223,18 +224,18 @@ def smooth_nz_preserve_moments(
 
     sigma_bins = float(sigma_dz / dz)
 
-    # Smooth with zero padding (reduces boundary artifacts)
+    # Smooth with zero padding to reduce edge artifacts.
     f = gaussian_filter1d(nz, sigma=sigma_bins, axis=1, mode="constant", cval=0.0)
     f = np.clip(f, 0.0, None)
 
-    # Optional taper enforcing n(0)=0 (physical boundary)
+    # Optional taper so n(0)=0 (physical boundary condition).
     if boundary_taper:
         z0 = max(taper_scale_factor * sigma_dz, 1e-12)
         u = np.clip((z - 0.0) / z0, 0.0, None)
-        w = 1.0 - np.exp(-(u ** taper_power))  # w(0)=0, ->1 smoothly
+        w = 1.0 - np.exp(-(u ** taper_power))  # w(0)=0 and approaches 1 smoothly.
         f = f * w[None, :]
 
-    # Targets from original
+    # Moment targets from the original profile.
     I0 = np.trapezoid(nz, z, axis=1)                   # ∫ n
     S0 = np.trapezoid(nz * nz, z, axis=1)              # ∫ n^2
     good = (I0 > 0) & (S0 > 0)
@@ -246,7 +247,7 @@ def smooth_nz_preserve_moments(
 
     for i in range(nz.shape[0]):
         if not good[i]:
-            # fallback: just return smoothed (optionally renormalized)
+            # Fallback: return the smoothed profile (optionally renormalized).
             if preserve_norm:
                 If = np.trapezoid(g_out[i], z)
                 if If > 0:
@@ -255,13 +256,13 @@ def smooth_nz_preserve_moments(
 
         gi = np.maximum(f[i], eps)
 
-        # initial normalization (if requested)
+        # Initial normalization (if requested).
         if preserve_norm:
             If = np.trapezoid(gi, z)
             if If > 0:
                 gi *= I0[i] / If
 
-        # Helpers
+        # Helper functions.
         def norm_to_I(x):
             """Scale x so that ∫x = I0 (if preserve_norm), else no-op."""
             if not preserve_norm:
@@ -277,24 +278,24 @@ def smooth_nz_preserve_moments(
                 return np.nan
             return np.trapezoid(z * x, z) / Ix
 
-        # For L2 constraint we always use the raw integral ∫g^2
+        # For the L2 constraint, use the raw integral ∫g^2.
         def l2_of(x):
             return np.trapezoid(x * x, z)
 
-        # Alternate enforcing mean and L2
+        # Alternate mean and L2 enforcement.
         for _ in range(outer_iter):
-            # ---- (1) Enforce mean via exponential tilt: x -> x * exp(alpha*(z - zref))
-            zref = mu0[i]  # centering improves conditioning
+            # (1) Enforce mean via exponential tilt: x -> x * exp(alpha*(z - zref)).
+            zref = mu0[i]  # Centering improves conditioning.
 
             def mean_residual(alpha):
                 x = gi * np.exp(alpha * (z - zref))
                 x = norm_to_I(x)
                 return mean_of(x) - mu0[i]
 
-            # If already close, skip solve
+            # Skip solve when already close.
             m_now = mean_of(gi)
             if np.isfinite(m_now) and abs(m_now - mu0[i]) > tol_mean:
-                # Bracket alpha; mean_residual is monotone in alpha if gi>=0
+                # Bracket alpha; mean_residual is monotone if gi >= 0.
                 aL, aR = -mean_bracket, mean_bracket
                 fL, fR = mean_residual(aL), mean_residual(aR)
                 if np.isfinite(fL) and np.isfinite(fR) and fL * fR < 0:
@@ -302,13 +303,13 @@ def smooth_nz_preserve_moments(
                     gi = gi * np.exp(alpha * (z - zref))
                     gi = norm_to_I(gi)
 
-            # ---- (2) Enforce L2 via power transform: x -> x^p (controls peakiness)
+            # (2) Enforce L2 via power transform: x -> x^p.
             S_target = S0[i]
             S_now = l2_of(gi)
 
             if S_now > 0 and abs(S_now - S_target) / S_target > tol_l2:
-                # Define S(p) after normalization (if enabled)
-                # If preserve_norm: scaling changes S, so include it.
+                # Define S(p) after normalization (if enabled).
+                # If preserve_norm is True, scaling changes S and must be included.
                 def l2_residual(p):
                     x = np.maximum(gi, eps) ** p
                     x = norm_to_I(x)
@@ -317,7 +318,7 @@ def smooth_nz_preserve_moments(
                 pL, pR = p_bracket
                 rL, rR = l2_residual(pL), l2_residual(pR)
 
-                # If not bracketed, do nothing (means target is incompatible with current gi under this transform)
+                # If not bracketed, keep the current profile for this iteration.
                 if np.isfinite(rL) and np.isfinite(rR) and rL * rR < 0:
                     p_star = brentq(l2_residual, pL, pR, maxiter=200)
                     gi = np.maximum(gi, eps) ** p_star
@@ -330,7 +331,7 @@ def smooth_nz_preserve_moments(
 
 
 def load_and_filter_catalog():
-    """Load and process the input galaxy catalog."""
+    """Load the input catalog and apply baseline quality cuts."""
     print(f"Loading catalog from {GAL_CAT_PATH}...")
     gal_cat = at.rec2pd(at.load_hdf(GAL_CAT_PATH))
     gal_cat = gal_cat[['sersic_n', 'int_mag', 'int_r50_arcsec', 'z', 'e1', 'e2']].rename(columns={
@@ -350,22 +351,43 @@ def load_and_filter_catalog():
         (gal_cat['r'] < cs['mag_max']) & (gal_cat['r'] > cs['mag_min']) &
         (gal_cat['Re'] < cs['re_max']) & (gal_cat['Re'] > cs['re_min']) &
         (gal_cat['sersic_n'] < cs['sersic_max']) & (gal_cat['sersic_n'] > cs['sersic_min'])
-    ].reset_index(drop=True).astype(np.float64)
+    ].reset_index(drop=True)
+
+    # Keep only fields used downstream.
+    gal_cat = gal_cat[['sersic_n', 'r', 'Re', 'redshift', 'BA', 'angle']]
+    gal_cat = gal_cat.astype(np.float32)
     return gal_cat
 
 
-def load_system_maps():
-    """Load system maps and return maps and SEEN_idx."""
+def load_system_maps(return_sim_idx: bool = False):
+    """Load system maps and return footprint indices on the stats grid.
+
+    Parameters
+    ----------
+    return_sim_idx : bool
+        If True, also return indices of valid pixels on simulation grid.
+    """
     print(f"Loading system maps from {MOCK_SYS_MAP_PATH}...")
     maps = hp.read_map(MOCK_SYS_MAP_PATH, field=None)
-    SEEN_idx = np.where(~np.isnan(maps[0]))[0]
-    return maps, SEEN_idx
+    seen_idx_sim = np.where(~np.isnan(maps[0]))[0]
+
+    if SYS_NSIDE_SIM == SYS_NSIDE_STATS:
+        seen_idx_stats = seen_idx_sim
+    else:
+        mask_sim = np.zeros(hp.nside2npix(SYS_NSIDE_SIM), dtype=float)
+        mask_sim[seen_idx_sim] = 1.0
+        mask_stats = hp.ud_grade(mask_sim, nside_out=SYS_NSIDE_STATS, power=0) > 0
+        seen_idx_stats = np.where(mask_stats)[0]
+
+    if return_sim_idx:
+        return maps, seen_idx_stats, seen_idx_sim
+    return maps, seen_idx_stats
 
 
 def galaxy_snr_from_mag_size(mag, r_half, seeing_fwhm, sigma_pix, zeropoint=30.0, pixscale=0.2):
-    """Approximate galaxy SNR."""
+    """Approximate galaxy SNR from magnitude, size, and observing conditions."""
 
-    # TODO: double check the factors 1.678 and 2.355
+    # TODO: Recheck the factors 1.678 and 2.355.
     flux = 10.0 ** (-0.4 * (mag - zeropoint))
     sigma_gal = r_half / 1.678
     sigma_psf = seeing_fwhm / 2.355
@@ -375,28 +397,46 @@ def galaxy_snr_from_mag_size(mag, r_half, seeing_fwhm, sigma_pix, zeropoint=30.0
     return snr
 
 
-def process_one(i, idx, icat, conditions, gal_num, psf_hp_map, noise_hp_map, galactic_hp_map, detec_mag_bound):
-    """Worker function for parallel processing."""
+def process_one(
+    i,
+    idx_sim,
+    icat,
+    conditions,
+    gal_num,
+    psf_hp_map,
+    noise_hp_map,
+    galactic_hp_map,
+    detec_mag_bound,
+    nside_sim,
+):
+    """Simulate one HEALPix pixel's worth of galaxies."""
     rng_local = np.random.default_rng(i)
     randi = rng_local.integers(0, icat.shape[0], size=gal_num)
     subset = icat.iloc[randi].copy()
-    subset['pix_idx'] = idx
 
-    # Compute RA/DEC for this pixel correctly
-    nside = hp.npix2nside(len(psf_hp_map))
-    ra, dec = hp.pix2ang(nside, idx, lonlat=True)
-    # Add small jitter within the pixel (approx pixel size)
-    pix_size_deg = np.sqrt(4 * np.pi * (180/np.pi)**2 / hp.nside2npix(nside))
-    rng_jitter = np.random.default_rng(i + 12345) 
-    subset['RA'] = ra + rng_jitter.uniform(-0.5 * pix_size_deg, 0.5 * pix_size_deg, size=gal_num)
-    subset['DEC'] = dec + rng_jitter.uniform(-0.5 * pix_size_deg, 0.5 * pix_size_deg, size=gal_num)
+    # RA/DEC are required by nz_utils.icat2cla_v2 for neighbor features.
+    ra_c, dec_c = hp.pix2ang(nside_sim, idx_sim, lonlat=True)
+    pix_size_deg = np.sqrt(4 * np.pi * (180 / np.pi) ** 2 / hp.nside2npix(nside_sim))
+    rng_jitter = np.random.default_rng(i + 12345)
+    subset['RA'] = (
+        ra_c + rng_jitter.uniform(-0.5 * pix_size_deg, 0.5 * pix_size_deg, size=gal_num)
+    ) % 360.0
+    subset['DEC'] = np.clip(
+        dec_c + rng_jitter.uniform(-0.5 * pix_size_deg, 0.5 * pix_size_deg, size=gal_num),
+        -90.0,
+        90.0,
+    )
+
+    # Keep simulation-grid pixel IDs; remap later for stats.
+    subset['pix_idx'] = np.int64(idx_sim)
 
     conds = conditions.copy()
-    conds['psf_fwhm'] = psf_hp_map[idx]
-    conds['pixel_rms'] = noise_hp_map[idx]
+    conds['psf_fwhm'] = psf_hp_map[idx_sim]
+    conds['pixel_rms'] = noise_hp_map[idx_sim]
     
-    subset.loc[:, 'r'] += galactic_hp_map[idx]
-    subset.loc[subset['r'] > detec_mag_bound, 'r'] = detec_mag_bound
+    subset.loc[:, 'r'] += galactic_hp_map[idx_sim]
+    # Flag objects beyond the detectability bound so they can be skipped as primaries.
+    subset['beyond_detec_bound'] = subset['r'] > detec_mag_bound
 
     for key, value in conds.items():
         subset[key] = value
@@ -409,7 +449,8 @@ def process_one(i, idx, icat, conditions, gal_num, psf_hp_map, noise_hp_map, gal
         zeropoint=subset['zero_point'],
         pixscale=subset['pixel_size'],
     )
-    
+
+    subset = downcast_float64_to32(subset)
     return subset
 
 def compute_obs_stats(subset, rng=None):
@@ -417,7 +458,7 @@ def compute_obs_stats(subset, rng=None):
     if rng is None:
         rng = np.random.default_rng()
 
-    # Use names with _input_p suffix as they appear in the classified catalog
+    # Use _input_p column names to match the classified catalog schema.
     subset['snr_input_p'] = galaxy_snr_from_mag_size(
         subset['r_input_p'],
         subset['Re_input_p'],
@@ -431,13 +472,14 @@ def compute_obs_stats(subset, rng=None):
     subset['r_obs_input_p'] = subset['r_input_p'] + rng.normal(0, sigma_m, size=subset.shape[0])
     # subset['sigma_m_input_p'] = sigma_m
 
-    # --- New photo-z model (from snippet) ---
+    # Photo-z scatter model.
     m = subset['r_input_p']
     rms = subset['pixel_rms_input_p']
     psf_fwhm = subset['psf_fwhm_input_p']
 
     alpha = PHOTOZ_PARAMS['alpha']
-    sigma0 = PHOTOZ_PARAMS['sigma0']
+    sigma_pho = PHOTOZ_PARAMS['sigma_pho']
+    sigma_int = PHOTOZ_PARAMS['sigma_int']
     m_ref = PHOTOZ_PARAMS['m_ref']
     rms_ref = PHOTOZ_PARAMS['rms_ref']
     psf_fwhm_ref = PHOTOZ_PARAMS['psf_fwhm_ref']
@@ -445,11 +487,12 @@ def compute_obs_stats(subset, rng=None):
     dm = 2.5 * np.log10((rms / rms_ref) * (psf_fwhm / psf_fwhm_ref)**2)
     k = 10**(alpha * (m - m_ref + dm))
 
-    sigma_z = sigma0 * k
-    sigma_z = np.maximum(sigma_z, PHOTOZ_PARAMS['sigma_min'])
+    sigma_pho *= k
+    # sigma_z = np.maximum(sigma_z, PHOTOZ_PARAMS['sigma_min'])
+    sigma_z = np.sqrt(sigma_pho**2 + sigma_int**2)
     mu_z = subset['redshift_input_p']
 
-    # Compute photo-z with Gaussian scatter
+    # Draw photo-z with Gaussian scatter.
     z_pho = mu_z + rng.normal(0, sigma_z, size=subset.shape[0])
     
     subset['z_pho_input_p'] = z_pho
@@ -475,28 +518,31 @@ def apply_maglim_selection(subset, rng=None):
 
 def process_classified_catalog(df, rng=None):
     """
-    Perform any actions between having a classified catalog and summary statistics.
-    Currently: photo-z assignment and MagLim selection.
+    Apply post-classification processing before summary statistics.
+    Currently this includes photo-z assignment and MagLim selection.
     """
 
-    # compute observed magnitude and redshift based on input properties
-    df = compute_obs_stats(df, rng=rng)
+    # Keep this idempotent for already-processed catalogs.
+    if 'z_pho_input_p' not in df.columns:
+        # Compute observed magnitude and photo-z from input properties.
+        df = compute_obs_stats(df, rng=rng)
 
-    # Apply MagLim selection
-    df = apply_maglim_selection(df, rng=rng)
+        # Apply MagLim selection.
+        df = apply_maglim_selection(df, rng=rng)
 
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     bin_mask = get_binning_weights(df, tomo_bin_edges)
     for i in range(len(tomo_bin_edges) - 1):
         df[f"tomo_p_{i}"] = bin_mask[:, i]
     
-    # Final cleanup of unused columns to save memory
+    # Final cleanup of unused columns to save memory.
     keep_cols = ['pix_idx_input_p', 'redshift_input_p', 'detection', 'snr_input_p',
-                 'r_input_p', 'Re_input_p', 'sigma_m_input_p', 'sigma_z_input_p',
-                 'pixel_rms_input_p', 'psf_fwhm_input_p']
+                 'r_input_p', 'Re_input_p',
+                 'pixel_rms_input_p', 'psf_fwhm_input_p', 'z_pho_input_p']
     tomo_cols = [c for c in df.columns if c.startswith('tomo_p_')]
     final_cols = list(dict.fromkeys([c for c in keep_cols + tomo_cols if c in df.columns]))
     df = df[final_cols].copy()
+    df = downcast_float64_to32(df)
     
     return df
 
@@ -518,11 +564,10 @@ def get_binning_weights(df, bin_edges):
 
 def simulate_and_classify_chunked(gal_cat, z, edges):
     """
-    Memory-efficient simulation and classification. 
-    Filters non-detections immediately to save 90%+ memory.
+    Run chunked simulation and classification with memory-aware filtering.
     """
     import gc
-    maps, SEEN_idx = load_system_maps()
+    maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
     psf_hp_map, noise_hp_map, galactic_hp_map = maps
     
     conditions = {
@@ -535,6 +580,7 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
     detec_mag_bound = config.OBS_CONDITIONS['detec_mag_bound']
     z_bins_n = len(z)
 
+    t_sim_total_start = time.perf_counter()
     print("Loading XGBoost model...")
     bst_cla = xgb.Booster({'device': 'cuda', 'n_jobs': -1})
     bst_cla.load_model(MODEL_JSON)
@@ -542,46 +588,71 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
     temp_dir = os.path.join(os.path.dirname(OUTPUT_PREDS), "temp_chunks")
     os.makedirs(temp_dir, exist_ok=True)
     
-    # Global Input Statistics Accumulators
+    # Global input-statistics accumulators.
     global_hist_in = np.zeros(z_bins_n)
     global_num_in = 0
     
     pixels_per_chunk = max(1, CHUNK_SIZE // N_POP_SAMPLE)
-    n_pixels = len(SEEN_idx)
+    n_pixels = len(SEEN_idx_SIM)
     chunk_files = []
     
     print(f"Starting chunked processing: {n_pixels} pixels in groups of {pixels_per_chunk}")
     
     for start_p in range(0, n_pixels, pixels_per_chunk):
         end_p = min(start_p + pixels_per_chunk, n_pixels)
-        block_indices = SEEN_idx[start_p:end_p]
+        block_indices = SEEN_idx_SIM[start_p:end_p]
         
         print(f"  Chunk {start_p//pixels_per_chunk + 1}/{(n_pixels-1)//pixels_per_chunk + 1} ({len(block_indices)} pixels)")
         
-        # 1. Simulate this block
+        # 1) Simulate this block.
         results = Parallel(n_jobs=N_JOBS, backend="threading")(
-            delayed(process_one)(start_p + i, idx, gal_cat, conditions, N_POP_SAMPLE,
-                                 psf_hp_map, noise_hp_map, galactic_hp_map, detec_mag_bound)
+            delayed(process_one)(
+                start_p + i,
+                idx,
+                gal_cat,
+                conditions,
+                N_POP_SAMPLE,
+                psf_hp_map,
+                noise_hp_map,
+                galactic_hp_map,
+                detec_mag_bound,
+                SYS_NSIDE_SIM,
+            )
             for i, idx in enumerate(block_indices)
         )
         block_fullset = pd.concat(results, ignore_index=True)
+        block_fullset = downcast_float64_to32(block_fullset)
         results = None 
         
-        # Accumulate input statistics before classification/filtering
+        # Accumulate input statistics before classification/filtering.
         h_in = np.histogram(block_fullset["redshift"], bins=edges)[0]
         global_hist_in += h_in
         global_num_in += len(block_fullset)
         
-        # 2. Coordinates are now handled in process_one.
+        # 2) Coordinates are handled in process_one.
 
-        # 3. Classify and Filter
+        # 3) Classify and filter.
         try:
-            block_cla = nz_utils.icat2cla_v2(block_fullset, block_fullset, bst_cla, predict=True)
-            # CRITICAL: Keep only detections to save memory
-            block_cla = block_cla[block_cla['detection'] > DETECTION_THRESHOLD].copy()
-            
-            # Keep all columns needed by downstream photo-z, MagLim, and stats.
-            # !CAREFUL: only part of columns are kept to save memory, while it can lead to bug if some columns are missing
+            predictable = ~(block_fullset['beyond_detec_bound'].astype(bool).to_numpy())
+            block_fullset_pred = block_fullset.loc[predictable].copy()
+
+            # Predict only for primaries within the detectability bound.
+            if not block_fullset_pred.empty:
+                block_cla_pred = nz_utils.icat2cla_v2(
+                    block_fullset_pred,
+                    # Keep full neighbor context for feature construction.
+                    block_fullset,
+                    bst_cla,
+                    predict=True,
+                )
+            else:
+                block_cla_pred = pd.DataFrame(columns=['detection'])
+
+            # Faint primaries are skipped as primaries but still act as neighbors.
+            block_cla = block_cla_pred
+
+            # Keep only downstream columns before filtering to avoid dtype issues.
+            # Important: dropping too many columns can break later steps.
             keep_cols = [
                 'pix_idx_input_p', 'redshift_input_p', 'detection',
                 'r_input_p', 'Re_input_p', 'sersic_n_input_p', 'axis_ratio_input_p',
@@ -589,6 +660,15 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
                 'pixel_size_input_p', 'moffat_beta_input_p'
             ]
             block_cla = block_cla[[c for c in keep_cols if c in block_cla.columns]].copy()
+
+            # Keep detections only to save memory.
+            # Coerce to numeric for robustness against unexpected dtypes.
+            det_vals = pd.to_numeric(block_cla['detection'], errors='coerce').fillna(0.0).to_numpy()
+            block_cla = block_cla.loc[det_vals > DETECTION_THRESHOLD].copy()
+
+            block_cla = downcast_float64_to32(block_cla)
+            if 'pix_idx_input_p' in block_cla.columns:
+                block_cla['pix_idx_input_p'] = block_cla['pix_idx_input_p'].astype(np.int32)
             
             if not block_cla.empty:
                 temp_path = os.path.join(temp_dir, f"cla_chunk_det_{start_p}.feather")
@@ -603,11 +683,11 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
         gc.collect()
         print(f"    Memory usage: {get_memory_usage():.2f} GB")
 
-    # Pre-calculated density and num
+    # Precompute global input density and counts.
     dz = np.diff(edges)
     dndz_in_total = global_hist_in / (global_num_in * dz) if global_num_in > 0 else global_hist_in
     
-    # Pack global simulation truth
+    # Pack global simulation truth.
     sim_truth = {
         'dndz_in': dndz_in_total,
         'num_in': global_num_in,
@@ -616,58 +696,105 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
         'z': z
     }
         
-    return chunk_files, psf_hp_map, SEEN_idx, sim_truth
+    print(f"Simulation+classification stage completed in {time.perf_counter() - t_sim_total_start:.1f}s")
+    return chunk_files, SEEN_idx, SEEN_idx_SIM, sim_truth
 
 
-def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges, sim_truth=None):
-    """Compute detection maps and dN/dz distributions from a catalog."""
+def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output_dir, z, edges, sim_truth=None):
+    """Compute detection maps and dN/dz summaries from a catalog."""
+    n_input_pix = get_input_counts_per_stats_pixel(
+        seen_idx_sim,
+        nside_sim=SYS_NSIDE_SIM,
+        nside_stats=SYS_NSIDE_STATS,
+        n_pop_sample=N_POP_SAMPLE,
+    )
+
+    cla_cat = cla_cat.copy()
+    cla_cat["pix_idx_stats"] = map_pix_sim_to_stats(
+        cla_cat["pix_idx_input_p"].to_numpy(dtype=np.int64),
+        nside_sim=SYS_NSIDE_SIM,
+        nside_stats=SYS_NSIDE_STATS,
+    )
+
     mean_p = np.full(NPIX, hp.UNSEEN)
     
-    # Map pixels to active indices to avoid out-of-bounds
-    pixel_counts = np.bincount(cla_cat['pix_idx_input_p'], weights=cla_cat['detection'], minlength=NPIX)
-    mean_p[SEEN_idx] = pixel_counts[SEEN_idx] / N_POP_SAMPLE
+    # Fill only active footprint pixels.
+    pixel_counts = np.bincount(cla_cat['pix_idx_stats'], weights=cla_cat['detection'], minlength=NPIX)
+    valid_denom = n_input_pix[SEEN_idx] > 0
+    mean_p[SEEN_idx[valid_denom]] = pixel_counts[SEEN_idx[valid_denom]] / n_input_pix[SEEN_idx[valid_denom]]
     
     p_valid = mean_p[SEEN_idx]
     print(f"Detection Rate Stats: min={np.min(p_valid):.4f}, max={np.max(p_valid):.4f}, mean={np.mean(p_valid):.4f}")
 
-    plt_nz.plt_map(mean_p, SYS_NSIDE, SEEN_idx, 
+    plt_nz.plt_map(mean_p, SYS_NSIDE_STATS, SEEN_idx, 
             save_path=os.path.join(output_dir, "detection_rate_map.png"))
     
     results = {}
     dz = np.diff(edges)
 
-    # Full Sample
-    sys_res_full = groupby_dndz(cla_cat, z, edges, sim_truth=sim_truth)
+    # Full sample.
+    sys_res_full = groupby_dndz(
+        cla_cat,
+        z,
+        edges,
+        sim_truth=sim_truth,
+        pix_col="pix_idx_stats",
+        n_pix=NPIX,
+    )
     metadata_rows_full = sys_res_full.loc[["total_input", "total_detected"]].copy()
     sys_res_data_full = sys_res_full.reindex(SEEN_idx).fillna(0)
     sys_res_final_full = pd.concat([sys_res_data_full, metadata_rows_full])
     
-    results['full'] = process_stats(sys_res_final_full, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
+    results['full'] = process_stats(
+        sys_res_final_full,
+        z,
+        SEEN_idx,
+        smooth=config.ANALYSIS_SETTINGS['smooth_nz'],
+        n_input_pix=n_input_pix[SEEN_idx],
+    )
     
-    # Tomographic Bins
+    # Tomographic bins.
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     for i in range(len(tomo_bin_edges)-1):
         tomo_col = f"tomo_p_{i}"
         if tomo_col in cla_cat.columns:
-            sys_res_i = groupby_dndz(cla_cat, z, edges, weight_col=tomo_col, sim_truth=sim_truth)
+            sys_res_i = groupby_dndz(
+                cla_cat,
+                z,
+                edges,
+                weight_col=tomo_col,
+                sim_truth=sim_truth,
+                pix_col="pix_idx_stats",
+                n_pix=NPIX,
+            )
             meta_i = sys_res_i.loc[["total_input", "total_detected"]].copy()
             sys_res_i_data = sys_res_i.reindex(SEEN_idx).fillna(0)
             sys_res_i_final = pd.concat([sys_res_i_data, meta_i])
             
-            results[f'tomo_{i}'] = process_stats(sys_res_i_final, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
+            results[f'tomo_{i}'] = process_stats(
+                sys_res_i_final,
+                z,
+                SEEN_idx,
+                smooth=config.ANALYSIS_SETTINGS['smooth_nz'],
+                n_input_pix=n_input_pix[SEEN_idx],
+            )
             
     return results
 
 
-def process_stats(sys_res, z, SEEN_idx, smooth=False):
-    """Auxiliary to package dndz results."""
+def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
+    """Package dN/dz-derived statistics for downstream outputs."""
     dndzs = sys_res.drop(["sum_num", "std_z_pix"], axis=1)
     if "total_input" in dndzs.index:
         dndzs = dndzs.drop(["total_input", "total_detected"])
     
     dndzs = dndzs.to_numpy()
     sum_num = sys_res["sum_num"].drop(["total_input", "total_detected"]).values
-    frac_pix = sum_num / N_POP_SAMPLE
+    if n_input_pix is not None:
+        n_input_pix = np.asarray(n_input_pix, dtype=float)
+        frac_pix = np.divide(sum_num, n_input_pix, out=np.zeros_like(sum_num, dtype=float), where=n_input_pix > 0)
+    else:
+        frac_pix = sum_num / N_POP_SAMPLE
     std_z_pix = sys_res["std_z_pix"].drop(["total_input", "total_detected"]).values
     
     dndz_in = sys_res.drop(["sum_num", "std_z_pix"], axis=1).loc["total_input"].to_numpy().astype(float)
@@ -676,10 +803,27 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
     std_z_global = sys_res.loc["total_detected", "std_z_pix"]
 
     z_std_ratio = sys_res.attrs.get('z_std_ratio', 1.0)
+    min_count = int(config.STATS_PARAMS.get('min_count', 0))
+    valid_pix = sum_num > min_count
 
-    # Calculate unsmoothed stats (baseline)
-    geo_w_pix, geo_w_glob, geo_enhancement = utils.calculate_geometric_stats(z, dndzs, dndz_det, frac_pix=None)
-    z_std_ratio_binned = utils.calculate_binned_std_ratio(z, dndzs, dndz_det, frac_pix=None)
+    # Unsmoothed baseline stats using the active min_count mask.
+    if np.any(valid_pix):
+        dndzs_valid = dndzs[valid_pix]
+        frac_pix_valid = frac_pix[valid_pix]
+        geo_w_pix_valid, geo_w_glob, geo_enhancement = utils.calculate_geometric_stats(
+            z, dndzs_valid, dndz_det, frac_pix=frac_pix_valid
+        )
+        z_std_ratio_binned = utils.calculate_binned_std_ratio(
+            z, dndzs_valid, dndz_det, frac_pix=frac_pix_valid
+        )
+
+        geo_w_pix = np.zeros_like(frac_pix, dtype=float)
+        geo_w_pix[valid_pix] = geo_w_pix_valid
+    else:
+        geo_w_pix = np.zeros_like(frac_pix, dtype=float)
+        geo_w_glob = 0.0
+        geo_enhancement = 1.0
+        z_std_ratio_binned = 1.0
     z_std_ratio_weighted = sys_res.attrs.get('z_std_ratio_pix_weighted', 1.0)
 
     if smooth:
@@ -689,9 +833,23 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
         sm_dndz_in = smooth_nz_preserve_moments(z, dndz_in, sigma_dz=sigma_dz)
         sm_dndz_det = smooth_nz_preserve_moments(z, dndz_det, sigma_dz=sigma_dz)
         
-        # Recalculate widths for smoothed distributions
-        sm_geo_w_pix, sm_geo_w_glob, sm_geo_enhancement = utils.calculate_geometric_stats(z, sm_dndzs, sm_dndz_det, frac_pix=None)
-        sm_z_std_ratio_binned = utils.calculate_binned_std_ratio(z, sm_dndzs, sm_dndz_det, frac_pix=None)
+        # Recompute widths for smoothed distributions with the same min_count mask.
+        if np.any(valid_pix):
+            sm_dndzs_valid = sm_dndzs[valid_pix]
+            frac_pix_valid = frac_pix[valid_pix]
+            sm_geo_w_pix_valid, sm_geo_w_glob, sm_geo_enhancement = utils.calculate_geometric_stats(
+                z, sm_dndzs_valid, sm_dndz_det, frac_pix=frac_pix_valid
+            )
+            sm_z_std_ratio_binned = utils.calculate_binned_std_ratio(
+                z, sm_dndzs_valid, sm_dndz_det, frac_pix=frac_pix_valid
+            )
+            sm_geo_w_pix = np.zeros_like(frac_pix, dtype=float)
+            sm_geo_w_pix[valid_pix] = sm_geo_w_pix_valid
+        else:
+            sm_geo_w_pix = np.zeros_like(frac_pix, dtype=float)
+            sm_geo_w_glob = 0.0
+            sm_geo_enhancement = 1.0
+            sm_z_std_ratio_binned = 1.0
 
         return {
             'z': z, 'dndzs': sm_dndzs, 'dndz_in': sm_dndz_in, 'dndz_det': sm_dndz_det,
@@ -719,165 +877,10 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False):
             'geo_enhancement_unsmoothed': geo_enhancement
         }
 
-
-# def generate_summary_statistics_incremental(chunk_files, SEEN_idx, output_dir, z, edges):
-#     """Memory-efficient incremental statistics generation."""
-#     import gc
-#     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
-#     keys = ['full'] + [f'tomo_{i}' for i in range(len(tomo_bin_edges)-1)]
-#     dz = np.diff(edges)
-#     n_z = len(z)
-
-#     # Accumulators
-#     det_counts_map = np.zeros(NPIX)
-    
-#     accumulators = {k: np.zeros((NPIX, n_z)) for k in keys}
-#     total_det_nums = {k: 0.0 for k in keys}
-#     total_det_hists = {k: np.zeros(n_z) for k in keys}
-    
-#     # Track the global input population distribution
-#     global_input_hist = np.zeros(n_z)
-#     total_input_num = 0
-    
-#     # Accumulators for z_std_ratio
-#     w_sum_pix = {k: np.zeros(NPIX) for k in keys}
-#     wz_sum_pix = {k: np.zeros(NPIX) for k in keys}
-#     wz2_sum_pix = {k: np.zeros(NPIX) for k in keys}
-    
-#     total_z_w_sum = {k: 0.0 for k in keys}
-#     total_z_wz_sum = {k: 0.0 for k in keys}
-#     total_z_wz2_sum = {k: 0.0 for k in keys}
-
-#     print(f"Incremental accumulation from chunks (with post-detection cuts)...")
-#     for f in chunk_files:
-#         df = pd.read_feather(f)
-#         if df.empty: continue
-        
-#         df = process_classified_catalog(df)
-#         if df.empty: continue
-
-#         pixel_indices = df["pix_idx_input_p"].values
-#         z_vals = df["redshift_input_p"].values
-#         weights_det = df["detection"].values
-        
-#         # Accumulate input truth (unweighted by detection)
-#         global_input_hist += np.histogram(z_vals, bins=edges)[0]
-#         total_input_num += len(df)
-        
-#         # Detection rate map (soft count)
-#         pixel_counts = np.bincount(pixel_indices, weights=weights_det, minlength=NPIX)
-#         det_counts_map += pixel_counts
-        
-
-#         for k in keys:
-#             if k == 'full':
-#                 weights = weights_det
-#             else:
-#                 idx = int(k.split('_')[1])
-#                 weights = weights_det * df[f'tomo_p_{idx}'].values
-                
-#             total_det_nums[k] += weights.sum()
-#             total_det_hists[k] += np.histogram(z_vals, bins=edges, weights=weights)[0]
-            
-#             # Per-pixel histogram accumulation
-#             pixel_counts_k, _ = utils.compute_pixel_histograms(
-#                 pix_idx=pixel_indices,
-#                 vals=z_vals,
-#                 weights=weights,
-#                 edges=edges,
-#                 n_pix=NPIX
-#             )
-#             accumulators[k] += pixel_counts_k
-
-#             # Redshift-based accumulation
-#             w_sum_pix[k] += np.bincount(pixel_indices, weights=weights, minlength=NPIX)
-#             wz_sum_pix[k] += np.bincount(pixel_indices, weights=weights * z_vals, minlength=NPIX)
-#             wz2_sum_pix[k] += np.bincount(pixel_indices, weights=weights * z_vals**2, minlength=NPIX)
-            
-#             total_z_w_sum[k] += weights.sum()
-#             total_z_wz_sum[k] += (weights * z_vals).sum()
-#             total_z_wz2_sum[k] += (weights * z_vals**2).sum()
-            
-#         df = None
-#         gc.collect()
-
-#     # Post-process and packaging
-#     final_results = {}
-    
-#     # 1. Detection Rate Map
-#     mean_p = np.full(NPIX, hp.UNSEEN)
-#     mean_p[SEEN_idx] = det_counts_map[SEEN_idx] / N_POP_SAMPLE
-    
-#     p_valid = mean_p[SEEN_idx]
-#     print(f"Detection Rate Stats: min={np.min(p_valid):.4f}, max={np.max(p_valid):.4f}, mean={np.mean(p_valid):.4f}")
-    
-#     plt_nz.plt_map(mean_p, SYS_NSIDE, SEEN_idx, 
-#             save_path=os.path.join(output_dir, "detection_rate_map.png"))
-
-#     for k in keys:
-#         pixel_counts = accumulators[k]
-#         sum_num = pixel_counts.sum(axis=1)
-        
-#         # Filter to SEEN_idx and normalize
-#         active_counts = pixel_counts[SEEN_idx]
-#         active_sum_num = sum_num[SEEN_idx]
-        
-#         hist_raw = np.zeros_like(active_counts)
-#         mask_v = active_sum_num > 0
-#         hist_raw[mask_v] = active_counts[mask_v] / (active_sum_num[mask_v][:, None] * dz)
-        
-#         df_stats = pd.DataFrame(hist_raw)
-#         df_stats["sum_num"] = active_sum_num
-#         # Calculate redshift stats for this bin using accumulated sums
-#         std_z_all, std_z_pix, z_std_ratio = utils.compute_redshift_stats_from_sums(
-#             w_sum_pix=w_sum_pix[k][SEEN_idx],
-#             wz_sum_pix=wz_sum_pix[k][SEEN_idx],
-#             wz2_sum_pix=wz2_sum_pix[k][SEEN_idx],
-#             total_w=total_z_w_sum[k],
-#             total_wz=total_z_wz_sum[k],
-#             total_wz2=total_z_wz2_sum[k]
-#         )
-#         df_stats["std_z_pix"] = std_z_pix
-#         df_stats.attrs['z_std_ratio'] = z_std_ratio
-
-#         w_sum_seen = w_sum_pix[k][SEEN_idx]
-#         mask_v = (w_sum_seen > 0) & (std_z_pix > 0)
-#         mean_std_z_pix_unweighted = np.mean(std_z_pix[w_sum_seen > 0]) if np.any(w_sum_seen > 0) else 0.0
-        
-#         if np.any(mask_v):
-#             z_std_ratio_weighted = np.average(1.0 / std_z_pix[mask_v], weights=w_sum_seen[mask_v]) * std_z_all
-#         else:
-#             z_std_ratio_weighted = 1.0
-
-#         df_stats.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
-#         print(
-#             f"[{k:10s}] Redshift-based std ratio: {z_std_ratio:.6f} "
-#             f"(pix-wtd inverse: {z_std_ratio_weighted:.6f}; "
-#             f"mean_std_pix={mean_std_z_pix_unweighted:.6f})"
-#         )
-
-#         # dndz totals
-#         d_det = total_det_hists[k] / (total_det_nums[k] * dz) if total_det_nums[k] > 0 else total_det_hists[k]
-        
-#         # Reference Baseline (Input)
-#         d_in = global_input_hist / (total_input_num * dz) if total_input_num > 0 else d_det
-
-#         df_stats.loc["total_input"] = list(d_in) + [total_input_num, 0.0]
-#         df_stats.loc["total_detected"] = list(d_det) + [total_det_nums[k], std_z_all]
-        
-#         final_results[k] = process_stats(df_stats, z, SEEN_idx, smooth=config.ANALYSIS_SETTINGS['smooth_nz'])
-    
-#     return final_results
-
-
-
-
-
-
 def save_fits_output(stats, bin_idx=4):
     """Store final results in a multi-HDU FITS file."""
-    # Using magbin=1 as default for consistency with notebook template
-    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE, N_POP_SAMPLE, bin_idx)
+    # Keep bin naming consistent with downstream notebooks.
+    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE_STATS, N_POP_SAMPLE, bin_idx)
     os.makedirs(os.path.dirname(output_fits_path), exist_ok=True)
     
     hdus = [
@@ -901,7 +904,7 @@ def save_fits_output(stats, bin_idx=4):
 
 def load_fits_output(bin_idx=4):
     """Load results from a multi-HDU FITS file."""
-    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE, N_POP_SAMPLE, bin_idx)
+    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE_STATS, N_POP_SAMPLE, bin_idx)
     if not os.path.exists(output_fits_path):
         print(f"Warning: FITS file {output_fits_path} not found.")
         return None
@@ -930,28 +933,28 @@ def main():
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Use fixed redshift bins from config
+    # Use fixed redshift bins from config.
     z, edges = utils.get_redshift_bins(None)
     print(f"[Binning] Fixed Grid: z=[{edges[0]:.4f}, {edges[-1]:.4f}], dz={(edges[1]-edges[0]):.4f}, n_bins={len(z)}")
 
-    maps, SEEN_idx = load_system_maps()
+    maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
 
     if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
         print(f"Loading existing predictions from {OUTPUT_PREDS}...")
         cla_cat = pd.read_feather(OUTPUT_PREDS)
         
-        print("Processing loaded catalog (photo-z, cuts)...")
+        print("Processing loaded catalog if needed (photo-z, cuts)...")
         cla_cat = process_classified_catalog(cla_cat)
         
-        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges)
+        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
     else:
         if not os.path.exists(OUTPUT_PREDS):
              print(f"Predictions file {OUTPUT_PREDS} not found. Running simulation...")
         gal_cat = load_and_filter_catalog()
         
-        chunk_files, psf_hp_map, SEEN_idx, sim_truth = simulate_and_classify_chunked(gal_cat, z=z, edges=edges)
+        chunk_files, SEEN_idx, SEEN_idx_SIM, sim_truth = simulate_and_classify_chunked(gal_cat, z=z, edges=edges)
         
-        # Consolidation of detected galaxies (ONLY detected, so much smaller)
+        # Consolidate detected galaxies (detected-only catalog is much smaller).
         print(f"Re-assembling {len(chunk_files)} detected-only chunks...")
         cla_cat = pd.concat([pd.read_feather(f) for f in chunk_files], ignore_index=True)
 
@@ -961,11 +964,12 @@ def main():
         
         print("Final processing of consolidated catalog...")
         cla_cat = process_classified_catalog(cla_cat)
-        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, output_dir, z, edges, sim_truth=sim_truth)
+
+        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges, sim_truth=sim_truth)
             
         print(f"    Memory usage after re-assembly and processing: {get_memory_usage():.2f} GB")
         
-        # Cleanup temporary chunks
+        # Clean up temporary chunks.
         for f in chunk_files:
             os.remove(f)
         temp_dir = os.path.join(os.path.dirname(OUTPUT_PREDS), "temp_chunks")
@@ -985,8 +989,8 @@ def main():
     # plt_nz.plot_dm_c_comparison_objects(cla_cat, output_dir)
     # plt_nz.plot_z_distribution_comparison(cla_cat, output_dir, z=z, edges=edges)
     
-    # Save full sample and tomographic bins
-    # Using bin_idx=99 for full sample to avoid overlap with tomo bins
+    # Save full sample and tomographic bins.
+    # Use bin_idx=99 for the full sample to avoid overlap with tomo bins.
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     save_fits_output(results['full'], bin_idx=99) 
     for i in range(len(tomo_bin_edges) - 1):

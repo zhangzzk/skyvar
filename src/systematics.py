@@ -1,12 +1,8 @@
 """
-Systematics Simulation Module
------------------------------
-This module provides classes and functions for generating mock systematic maps.
+Build mock observing-condition maps (PSF, noise, Galactic extinction).
 
-Copyright Claim:
-The core geometric functions (gaussian_2d, lon_diff, lon_sum) and the 'tiles' class 
-are adapted from the 'tiaogeng' project (tiaogeng/codes/src/generate_mocksys.py) 
-by Zekang Zhang and collaborators.
+Parts of the geometry utilities and tile logic are adapted from
+`tiaogeng/codes/src/generate_mocksys.py`.
 """
 
 import os
@@ -28,17 +24,17 @@ except ImportError:
     import config
     import plotting as plt_nz
 
-# --- Core Functions (from generate_mocksys.py) ---
+# Core geometry helpers (adapted from generate_mocksys.py).
 
 def lon_diff(lon1, lon2):
-    """Calculate the minor arc difference between two longitudes."""
+    """Return the wrapped longitude difference in degrees."""
     dlon = lon1 - lon2
     dlon[(dlon) > 180] -= 360
     dlon[(dlon) < -180] += 360
     return dlon
 
 def lon_sum(lon, dlon):
-    """Calculate the longitude by adding a difference to another longitude."""
+    """Add a longitude offset and wrap into the valid range."""
     lon = np.atleast_1d(lon)
     dlon = np.atleast_1d(dlon)
     aux_sign = np.zeros((lon + dlon).shape)
@@ -48,7 +44,7 @@ def lon_sum(lon, dlon):
     return lon + dlon + 360 * aux_sign
 
 def gaussian_2d(x, y, cov=np.eye(2)*5, xmean=0, ymean=0, amp=1, shift=0):
-    """2-D Gaussian-like function."""
+    """Evaluate a 2D Gaussian-like profile."""
     dx = x - xmean
     dy = y - ymean
     dxdy = np.vstack([dx, dy])
@@ -56,7 +52,7 @@ def gaussian_2d(x, y, cov=np.eye(2)*5, xmean=0, ymean=0, amp=1, shift=0):
     return np.exp(-chi2/2) * amp + shift
 
 class Tiles:
-    """Class that defines a group of tiles in the sky."""
+    """Represent a regular grid of sky tiles."""
     def __init__(self, start_lon, start_lat, dx, dy, nlon, nlat):
         self.n_tiles = nlon * nlat
         lonind = np.arange(nlon)
@@ -76,7 +72,7 @@ class Tiles:
         self.dlons = lon_diff(self.corner_lon_e, self.corner_lon_w)
         
     def get_tileind_fast(self, lon, lat):
-        """Vectorized version: find which tile each (lon, lat) belongs to."""
+        """Vectorized lookup of tile indices for input sky positions."""
         lon = np.asarray(lon)
         lat = np.asarray(lat)
         tile_inds = np.full(lon.shape, -1, dtype=int)
@@ -95,10 +91,10 @@ class Tiles:
             tile_inds[mask] = i
 
         return tile_inds
-# --- Systematic Classes ---
+# Systematic-map model classes.
 
 class SystematicBase:
-    """Base class for tile-based systematics."""
+    """Base class for tile-based systematic models."""
     def __init__(self, tiles_obj, config_dict):
         self.tiles = tiles_obj
         self.config = config_dict
@@ -110,7 +106,7 @@ class SystematicBase:
         return self.eval_sys(pix_lons, pix_lats, pix_tile_ids)
 
 class PSFSystematic(SystematicBase):
-    """PSF systematic with tile-level and intra-tile variations."""
+    """PSF model with tile-level offsets and intra-tile structure."""
     def __init__(self, tiles_obj, config_dict):
         super().__init__(tiles_obj, config_dict)
         self.syscovs = np.zeros((self.tiles.n_tiles, 2, 2))
@@ -148,7 +144,7 @@ class PSFSystematic(SystematicBase):
         return source_sys
 
 class PixelNoiseSystematic(SystematicBase):
-    """Pixel noise systematic with tile-level scatter."""
+    """Pixel-noise model with per-tile scatter."""
     def __init__(self, tiles_obj, config_dict):
         super().__init__(tiles_obj, config_dict)
         self.tile_noise = np.random.normal(loc=self.config['mu0'], scale=self.config['sigma_tile'], size=self.tiles.n_tiles)
@@ -167,7 +163,7 @@ class PixelNoiseSystematic(SystematicBase):
         return source_sys
 
 class GalacticSystematic(SystematicBase):
-    """Galactic extinction based on SFD dust maps."""
+    """Galactic extinction model based on SFD dust maps."""
     def __init__(self, tiles_obj=None, config_dict=None):
         super().__init__(tiles_obj, config_dict)
         self.sfd = SFDQuery()
@@ -180,20 +176,20 @@ class GalacticSystematic(SystematicBase):
 
 
 def main():
-    # Ensure output directories exist
+    # Create output directories if needed.
     os.makedirs(os.path.join(config.BASE_DIR, "data"), exist_ok=True)
     os.makedirs(os.path.join(config.BASE_DIR, "output"), exist_ok=True)
 
-    nside = config.SIM_SETTINGS['sys_nside']
+    nside = config.SIM_SETTINGS['sys_nside_sim']
     npix = hp.nside2npix(nside)
     theta, phi = hp.pix2ang(nside, np.arange(npix))
     ra_pix, dec_pix = np.degrees(phi), np.degrees(0.5 * np.pi - theta)
 
-    # Footprint from config
+    # Sky footprint from config.
     RA_MIN, RA_MAX = config.SYSTEMATICS_CONFIG['footprint']['ra_range']
     DEC_MIN, DEC_MAX = config.SYSTEMATICS_CONFIG['footprint']['dec_range']
     
-    # Initialize Tiles
+    # Initialize tile grid.
     print("Initializing tiles...")
     dx = config.SYSTEMATICS_CONFIG['tiles']['size_deg']
     dy = dx
@@ -204,7 +200,7 @@ def main():
     pix_tileind = test_tiles.get_tileind_fast(ra_pix, dec_pix)
     mask_footprint = pix_tileind != -1
 
-    # Systematics
+    # Build systematics models.
     sys_noise = PixelNoiseSystematic(test_tiles, config.SYSTEMATICS_CONFIG['noise'])
     sys_psf = PSFSystematic(test_tiles, config.SYSTEMATICS_CONFIG['psf'])
     sys_galactic = GalacticSystematic()
@@ -219,7 +215,7 @@ def main():
     print(f"Saving maps to {output_path}...")
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
 
-    # Combined Plotting (Maps and Histograms)
+    # Combined plotting (maps + histograms).
     print("Generating consolidated overview plots...")
     plt_nz.plot_systematics_overview(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
