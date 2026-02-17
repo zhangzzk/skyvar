@@ -15,9 +15,11 @@ from astropy.io import fits
 
 try:
     from . import config
+    from . import utils
     from . import plotting as plt_nz
 except ImportError:
     import config
+    import utils
     import plotting as plt_nz
 
 
@@ -30,8 +32,8 @@ CATALOG_CFG = DENSITY_SETTINGS["catalog"]
 
 SYS_NSIDE = config.SIM_SETTINGS["sys_nside_stats"]
 N_POP_SAMPLE = config.SIM_SETTINGS["n_pop_sample"]
-OUTPUT_PREDS = config.PATHS["output_preds"]
-MOCK_SYS_MAP = config.PATHS["mock_sys_map"]
+OUTPUT_PREDS = utils.get_output_path("output_preds")
+MOCK_SYS_MAP = utils.get_output_path("mock_sys_map")
 
 
 @dataclass(frozen=True)

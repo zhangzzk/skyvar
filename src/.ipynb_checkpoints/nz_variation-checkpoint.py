@@ -41,7 +41,7 @@ def save_clustering_results_to_fits(all_clustering_results, output_path):
 
 def main():
     output_dir = 'output/'
-    w_theta_path = utils.get_output_path("w_theta_fits")
+    w_theta_path = config.PATHS['w_theta_fits']
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Load Pre-calculated Statistics from FITS

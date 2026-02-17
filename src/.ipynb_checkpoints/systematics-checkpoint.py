@@ -43,48 +43,13 @@ def lon_sum(lon, dlon):
     aux_sign[lon+dlon < 0] = 1
     return lon + dlon + 360 * aux_sign
 
-def gaussian_2d_iso(x, y, scale, amp=1.0):
-    """Evaluate an isotropic 2D Gaussian centred at the origin."""
-    r2 = x**2 + y**2
-    return amp * np.exp(-r2 / (2.0 * scale**2))
-
-
-def normalize_footprint(ra_range, dec_range):
-    """Return normalized footprint bounds and spans."""
-    ra_min = float(ra_range[0]) % 360.0
-    ra_max = float(ra_range[1]) % 360.0
-    dec_lo = min(float(dec_range[0]), float(dec_range[1]))
-    dec_hi = max(float(dec_range[0]), float(dec_range[1]))
-
-    ra_span = (ra_max - ra_min) % 360.0
-    if np.isclose(ra_span, 0.0):
-        ra_span = 360.0
-    dec_span = dec_hi - dec_lo
-    return ra_min, ra_max, dec_lo, dec_hi, ra_span, dec_span
-
-
-def in_ra_range(ra, ra_min, ra_max):
-    """Check whether longitudes are inside [ra_min, ra_max], allowing wrap."""
-    ra = np.asarray(ra) % 360.0
-    if ra_min <= ra_max:
-        return (ra >= ra_min) & (ra <= ra_max)
-    return (ra >= ra_min) | (ra <= ra_max)
-
-
-def build_tiles_from_footprint(ra_range, dec_range, size_deg):
-    """Build tile grid robustly from configured footprint and tile size."""
-    if size_deg <= 0:
-        raise ValueError(f"tiles.size_deg must be > 0, got {size_deg}")
-
-    ra_min, ra_max, dec_lo, dec_hi, ra_span, dec_span = normalize_footprint(ra_range, dec_range)
-    nlon = max(1, int(np.ceil(ra_span / size_deg)))
-    nlat = max(1, int(np.ceil(dec_span / size_deg)))
-
-    # Use tile centres as grid origins so nominal tile footprint is centered on config bounds.
-    start_lon = (ra_min + 0.5 * size_deg) % 360.0
-    start_lat = dec_lo + 0.5 * size_deg
-    tiles = Tiles(start_lon, start_lat, size_deg, size_deg, nlon, nlat)
-    return tiles, (ra_min, ra_max, dec_lo, dec_hi)
+def gaussian_2d(x, y, cov=np.eye(2)*5, xmean=0, ymean=0, amp=1, shift=0):
+    """Evaluate a 2D Gaussian-like profile."""
+    dx = x - xmean
+    dy = y - ymean
+    dxdy = np.vstack([dx, dy])
+    chi2 = np.sum(dxdy * (cov @ dxdy), axis=0)
+    return np.exp(-chi2/2) * amp + shift
 
 class Tiles:
     """Represent a regular grid of sky tiles."""
@@ -140,83 +105,61 @@ class SystematicBase:
     def __call__(self, pix_lons, pix_lats, pix_tile_ids=None):
         return self.eval_sys(pix_lons, pix_lats, pix_tile_ids)
 
-    def _correlated_tile_draws(self, mean, sigma, l_corr):
-        """Draw spatially-correlated tile values using an RBF covariance kernel.
-
-        Parameters
-        ----------
-        mean   : float – global mean value.
-        sigma  : float – std of the correlated component.
-        l_corr : float – correlation length [deg].
-        """
-        centers = self.tiles.tile_centers                     # (N, 2)
-        cos_dec = np.cos(np.radians(
-            0.5 * (centers[:, None, 1] + centers[None, :, 1])
-        ))
-        dlon = lon_diff(centers[:, None, 0], centers[None, :, 0]) * cos_dec
-        dlat = centers[:, None, 1] - centers[None, :, 1]
-        D2 = dlon**2 + dlat**2
-        C = sigma**2 * np.exp(-D2 / (2.0 * l_corr**2))
-        C += np.eye(len(C)) * (1e-10 * sigma**2)             # numerical jitter
-        return np.random.multivariate_normal(
-            np.full(len(C), mean), C
-        )
-
-
-class SeeingSystematic(SystematicBase):
-    """PSF seeing model: correlated + uncorrelated inter-tile + intra-tile bump."""
+class PSFSystematic(SystematicBase):
+    """PSF model with tile-level offsets and intra-tile structure."""
     def __init__(self, tiles_obj, config_dict):
         super().__init__(tiles_obj, config_dict)
-        cfg = self.config
-        # Smooth large-scale field
-        self.tile_seeing = self._correlated_tile_draws(
-            cfg['mu0'], cfg['sigma_corr'], cfg['l_corr']
-        )
-        # Independent tile-to-tile scatter on top
-        self.tile_seeing += np.random.normal(0, cfg['sigma_uncorr'],
-                                             size=self.tiles.n_tiles)
+        self.syscovs = np.zeros((self.tiles.n_tiles, 2, 2))
+        self.xmeans = np.zeros(self.tiles.n_tiles)
+        self.ymeans = np.zeros(self.tiles.n_tiles)
+
+        self.delta_tiles = np.random.normal(0, self.config['sigma_tile'], size=self.tiles.n_tiles)
+        self.amp_tiles = np.random.normal(self.config['Abar'], self.config['sigma_A'], size=self.tiles.n_tiles)
+
+        for t in range(self.tiles.n_tiles):
+            cov_xx = self.config['covxx_mean'] + (np.random.rand() - 0.5) * 2 * self.config['covxx_fluc']
+            cov_yy = self.config['covyy_mean'] + (np.random.rand() - 0.5) * 2 * self.config['covyy_fluc']
+            cov_xy = (np.random.rand() - 0.5) * 2 * self.config['covxy_fluc']
+            self.syscovs[t] = np.array([[cov_xx, cov_xy], [cov_xy, cov_yy]])
+            self.xmeans[t] = np.random.normal(scale=self.config['xmean_fluc'])
+            self.ymeans[t] = np.random.normal(scale=self.config['ymean_fluc'])
 
     def eval_sys(self, pix_lons, pix_lats, pix_tile_ids):
-        cfg = self.config
-        source_sys = np.full_like(pix_tile_ids, np.nan, dtype=float)
-        for t in tqdm(range(self.tiles.n_tiles), desc="Evaluating seeing"):
-            mask = pix_tile_ids == t
+        source_sys = np.zeros_like(pix_tile_ids, dtype=float)
+        for t in tqdm(range(self.tiles.n_tiles), desc="Evaluating PSF Systematic"):
+            mask = (pix_tile_ids == t)
             if not np.any(mask):
                 continue
-            # Local coordinates relative to tile centre [deg]
+
             x = lon_diff(pix_lons[mask], self.tiles.tile_centers[t][0]) * np.cos(
                 np.radians(self.tiles.tile_centers[t][1])
             )
             y = pix_lats[mask] - self.tiles.tile_centers[t][1]
-            G = gaussian_2d_iso(x, y, scale=cfg['intra_scale'], amp=1.0)
-            # Seeing degrades toward tile edges: PSF = s_t * (2 - G)
-            noise = np.random.normal(0, cfg['sigma_pix'], size=np.sum(mask))
-            source_sys[mask] = self.tile_seeing[t] * (2.0 - G) + noise
+
+            G = gaussian_2d(x, y, cov=self.syscovs[t], xmean=self.xmeans[t], ymean=self.ymeans[t])
+            noise = np.random.normal(0, self.config['sigma_pix'], size=np.sum(mask))
+            source_sys[mask] = self.config['mu0'] + self.delta_tiles[t] + self.amp_tiles[t] * G + noise
+
+        source_sys[pix_tile_ids == -1] = np.nan
         return source_sys
 
-
-class NoiseSystematic(SystematicBase):
-    """Pixel-noise (RMS) model: correlated + uncorrelated inter-tile components."""
+class PixelNoiseSystematic(SystematicBase):
+    """Pixel-noise model with per-tile scatter."""
     def __init__(self, tiles_obj, config_dict):
         super().__init__(tiles_obj, config_dict)
-        cfg = self.config
-        # Smooth large-scale field
-        self.tile_noise = self._correlated_tile_draws(
-            cfg['mu0'], cfg['sigma_corr'], cfg['l_corr']
-        )
-        # Independent tile-to-tile scatter on top
-        self.tile_noise += np.random.normal(0, cfg['sigma_uncorr'],
-                                            size=self.tiles.n_tiles)
+        self.tile_noise = np.random.normal(loc=self.config['mu0'], scale=self.config['sigma_tile'], size=self.tiles.n_tiles)
 
     def eval_sys(self, pix_lons, pix_lats, pix_tile_ids):
-        cfg = self.config
-        source_sys = np.full_like(pix_tile_ids, np.nan, dtype=float)
+        source_sys = np.zeros_like(pix_tile_ids, dtype=float)
         for t in range(self.tiles.n_tiles):
-            mask = pix_tile_ids == t
+            mask = (pix_tile_ids == t)
             if not np.any(mask):
                 continue
-            jitter = np.random.normal(0, cfg['sigma_pix'], size=np.sum(mask))
-            source_sys[mask] = self.tile_noise[t] + jitter
+            noise_val = self.tile_noise[t]
+            jitter = np.random.normal(0, self.config['sigma_pix'], size=np.sum(mask))
+            source_sys[mask] = noise_val + jitter
+
+        source_sys[pix_tile_ids == -1] = np.nan
         return source_sys
 
 class GalacticSystematic(SystematicBase):
@@ -249,27 +192,25 @@ def main():
     # Initialize tile grid.
     print("Initializing tiles...")
     dx = config.SYSTEMATICS_CONFIG['tiles']['size_deg']
-    test_tiles, (ra_min_n, ra_max_n, dec_lo_n, dec_hi_n) = build_tiles_from_footprint(
-        (RA_MIN, RA_MAX), (DEC_MIN, DEC_MAX), dx
-    )
+    dy = dx
+    nlon = int((RA_MAX - RA_MIN) / dx)
+    nlat = int((DEC_MAX - DEC_MIN) / dy)
+    test_tiles = Tiles(RA_MIN, DEC_MIN, dx, dy, nlon, nlat)
     
     pix_tileind = test_tiles.get_tileind_fast(ra_pix, dec_pix)
-    exact_footprint = in_ra_range(ra_pix, ra_min_n, ra_max_n) & (dec_pix >= dec_lo_n) & (dec_pix <= dec_hi_n)
-    pix_tileind[~exact_footprint] = -1
     mask_footprint = pix_tileind != -1
 
     # Build systematics models.
-    sys_noise = NoiseSystematic(test_tiles, config.SYSTEMATICS_CONFIG['noise'])
-    sys_psf = SeeingSystematic(test_tiles, config.SYSTEMATICS_CONFIG['psf'])
+    sys_noise = PixelNoiseSystematic(test_tiles, config.SYSTEMATICS_CONFIG['noise'])
+    sys_psf = PSFSystematic(test_tiles, config.SYSTEMATICS_CONFIG['psf'])
     sys_galactic = GalacticSystematic()
 
     print("Evaluating systematics...")
     pix_sys_noise = sys_noise(ra_pix, dec_pix, pix_tileind)
     pix_sys_psf = sys_psf(ra_pix, dec_pix, pix_tileind)
     pix_sys_galactic = sys_galactic(ra_pix, dec_pix)
-    pix_sys_galactic[~mask_footprint] = np.nan
 
-    output_path = utils.get_output_path("mock_sys_map")
+    output_path = config.PATHS['mock_sys_map']
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     print(f"Saving maps to {output_path}...")
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
@@ -279,10 +220,8 @@ def main():
     plt_nz.plot_systematics_overview(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
         ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
-        nside, mask_footprint,
-        os.path.join("output", "sys_combined.png"),
-        ra_range=(RA_MIN, RA_MAX), dec_range=(DEC_MIN, DEC_MAX),
-        hist_vlims=[None, None, (0, 0.5)],
+        nside, mask_footprint, 
+        os.path.join("output", "sys_combined.png")
     )
 
 if __name__ == "__main__":

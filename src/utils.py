@@ -10,6 +10,35 @@ try:
 except ImportError:
     from config import PHOTOZ_PARAMS, STATS_PARAMS
 
+def get_output_path(kind, bin_idx=None):
+    """Build standardized run-dependent output paths."""
+    try:
+        from . import config
+    except ImportError:
+        import config
+
+    sys_nside_sim = config.SIM_SETTINGS['sys_nside_sim']
+    sys_nside_stats = config.SIM_SETTINGS['sys_nside_stats']
+    n_pop_sample = config.SIM_SETTINGS['n_pop_sample']
+    size_deg = config.SYSTEMATICS_CONFIG['tiles']['size_deg']
+    # size_tag = str(size_deg).replace('.', 'p')
+    run_tag_map = f"sim{sys_nside_sim}_tile{size_deg}"
+    run_tag_pred = f"stats{sys_nside_sim}_pop{n_pop_sample}_tile{size_deg}"
+    run_tag = f"sim{sys_nside_sim}_stats{sys_nside_stats}_pop{n_pop_sample}_tile{size_deg}"
+
+    if kind == "mock_sys_map":
+        return os.path.join(config.PATHS['data_dir'], f"mock_sys_map_{run_tag_map}.fits")
+    if kind == "output_preds":
+        return os.path.join(config.PATHS['sys_preds_dir'], f"mock_sys_preds_{run_tag_pred}.feather")
+    if kind == "w_theta_fits":
+        return os.path.join(config.PATHS['sys_preds_dir'], f"w_theta_{run_tag}.fits")
+    if kind == "nz_bin_fits":
+        if bin_idx is None:
+            raise ValueError("bin_idx is required for kind='nz_bin_fits'")
+        return os.path.join(config.PATHS['sys_preds_dir'], f"sys_nz_{run_tag}", f"bin_{bin_idx}.fits")
+    raise ValueError(f"Unknown output path kind: {kind}")
+
+
 def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
     """
     Compute geometric widths and geometric enhancement.

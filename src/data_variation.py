@@ -23,7 +23,7 @@ except ImportError:
 
 # Constants from config.
 SYS_NSIDE = config.SIM_SETTINGS['sys_nside_stats']
-OUTPUT_PREDS = config.PATHS['output_preds']
+OUTPUT_PREDS = utils.get_output_path("output_preds")
 N_POP_SAMPLE = config.SIM_SETTINGS['n_pop_sample']
 
 
@@ -34,7 +34,7 @@ def main() -> None:
     
     # 1) Regenerate statistics from saved predictions.
     print("Loading predictions from catalog to regenerate statistics...")
-    preds_path = config.PATHS['output_preds']
+    preds_path = OUTPUT_PREDS
     if not os.path.exists(preds_path):
         print(f"Error: Predictions file {preds_path} not found. Run selection.py first.")
         return

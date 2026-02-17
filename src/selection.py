@@ -64,10 +64,9 @@ N_POP_SAMPLE = config.SIM_SETTINGS['n_pop_sample']
 CHUNK_SIZE = config.SIM_SETTINGS['chunk_size']
 N_JOBS = config.SIM_SETTINGS['n_jobs']
 GAL_CAT_PATH = config.PATHS['gal_cat']
-MOCK_SYS_MAP_PATH = config.PATHS['mock_sys_map']
+MOCK_SYS_MAP_PATH = utils.get_output_path("mock_sys_map")
 MODEL_JSON = config.PATHS['model_json']
-OUTPUT_PREDS = config.PATHS['output_preds']
-OUTPUT_FITS_TEMPLATE = config.PATHS['output_fits_template']
+OUTPUT_PREDS = utils.get_output_path("output_preds")
 DETECTION_THRESHOLD = config.SIM_SETTINGS['detection_threshold']
 NPIX = hp.nside2npix(SYS_NSIDE_STATS)
 PHOTOZ_PARAMS = config.PHOTOZ_PARAMS
@@ -100,7 +99,7 @@ def get_input_counts_per_stats_pixel(seen_idx_sim, nside_sim, nside_stats, n_pop
     return n_sim_per_stats * int(n_pop_sample)
 
 
-def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=None, pix_col="pix_idx_input_p", n_pix=None):
+def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, pix_col="pix_idx_input_p", n_pix=None):
     """Compute per-pixel normalized n(z) and effective counts with vectorized ops."""
     z = np.asarray(z)
     edges = np.asarray(edges)
@@ -164,19 +163,9 @@ def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, sim_truth=No
     out.attrs['z_std_ratio'] = z_std_ratio
     out.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
 
-    # Use provided simulation truth when available; otherwise estimate from input data.
-    if sim_truth is not None:
-        dndz_in = sim_truth['dndz_in']
-        num_in = sim_truth['num_in']
-    else:
-        # Fallback assumes sys_cat contains the full input population.
-        dndz_in = np.histogram(sys_cat["redshift_input_p"], bins=edges, density=True)[0]
-        num_in = sys_cat.shape[0] 
-
     dndz_det = np.histogram(df_cut["redshift_input_p"], bins=edges, density=True, weights=df_cut["_w"])[0]
     num_det = df_cut["_w"].sum()
 
-    out.loc["total_input"] = list(dndz_in) + [num_in, 0.0]
     out.loc["total_detected"] = list(dndz_det) + [num_det, std_z_all]
     
     return out
@@ -562,7 +551,7 @@ def get_binning_weights(df, bin_edges):
     return weights
 
 
-def simulate_and_classify_chunked(gal_cat, z, edges):
+def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
     """
     Run chunked simulation and classification with memory-aware filtering.
     """
@@ -655,9 +644,9 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
             # Important: dropping too many columns can break later steps.
             keep_cols = [
                 'pix_idx_input_p', 'redshift_input_p', 'detection',
-                'r_input_p', 'Re_input_p', 'sersic_n_input_p', 'axis_ratio_input_p',
+                'r_input_p', 'Re_input_p',
                 'psf_fwhm_input_p', 'pixel_rms_input_p', 'zero_point_input_p',
-                'pixel_size_input_p', 'moffat_beta_input_p'
+                'pixel_size_input_p'
             ]
             block_cla = block_cla[[c for c in keep_cols if c in block_cla.columns]].copy()
 
@@ -687,20 +676,15 @@ def simulate_and_classify_chunked(gal_cat, z, edges):
     dz = np.diff(edges)
     dndz_in_total = global_hist_in / (global_num_in * dz) if global_num_in > 0 else global_hist_in
     
-    # Pack global simulation truth.
-    sim_truth = {
-        'dndz_in': dndz_in_total,
-        'num_in': global_num_in,
-        'edges': edges,
-        'dz': dz,
-        'z': z
-    }
+    # Plot input dN/dz if output directory provided.
+    if output_dir:
+        plt_nz.plot_input_dndz(z, dndz_in_total, output_dir)
         
     print(f"Simulation+classification stage completed in {time.perf_counter() - t_sim_total_start:.1f}s")
-    return chunk_files, SEEN_idx, SEEN_idx_SIM, sim_truth
+    return chunk_files, SEEN_idx, SEEN_idx_SIM
 
 
-def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output_dir, z, edges, sim_truth=None):
+def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output_dir, z, edges):
     """Compute detection maps and dN/dz summaries from a catalog."""
     n_input_pix = get_input_counts_per_stats_pixel(
         seen_idx_sim,
@@ -708,6 +692,10 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
         nside_stats=SYS_NSIDE_STATS,
         n_pop_sample=N_POP_SAMPLE,
     )
+    # Total input count derived from the survey footprint geometry.
+    # This is the authoritative denominator for all detection fractions.
+    n_total_input = int(n_input_pix.sum())
+    print(f"Total input galaxies (from footprint): {n_total_input:,}")
 
     cla_cat = cla_cat.copy()
     cla_cat["pix_idx_stats"] = map_pix_sim_to_stats(
@@ -716,15 +704,16 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
         nside_stats=SYS_NSIDE_STATS,
     )
 
+    # Detection map (full sample, before tomo binning).
+    n_det_pix_full = np.bincount(cla_cat['pix_idx_stats'], weights=cla_cat['detection'], minlength=NPIX)
+    frac_det, frac_det_pix = compute_detection_fractions(
+        n_det_pix_full[SEEN_idx], n_input_pix[SEEN_idx]
+    )
+
     mean_p = np.full(NPIX, hp.UNSEEN)
-    
-    # Fill only active footprint pixels.
-    pixel_counts = np.bincount(cla_cat['pix_idx_stats'], weights=cla_cat['detection'], minlength=NPIX)
-    valid_denom = n_input_pix[SEEN_idx] > 0
-    mean_p[SEEN_idx[valid_denom]] = pixel_counts[SEEN_idx[valid_denom]] / n_input_pix[SEEN_idx[valid_denom]]
-    
-    p_valid = mean_p[SEEN_idx]
-    print(f"Detection Rate Stats: min={np.min(p_valid):.4f}, max={np.max(p_valid):.4f}, mean={np.mean(p_valid):.4f}")
+    mean_p[SEEN_idx] = frac_det_pix
+    print(f"Detection Rate Stats: frac={frac_det:.4f}, "
+          f"min={np.min(frac_det_pix):.4f}, max={np.max(frac_det_pix):.4f}, mean={np.mean(frac_det_pix):.4f}")
 
     plt_nz.plt_map(mean_p, SYS_NSIDE_STATS, SEEN_idx, 
             save_path=os.path.join(output_dir, "detection_rate_map.png"))
@@ -737,11 +726,10 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
         cla_cat,
         z,
         edges,
-        sim_truth=sim_truth,
         pix_col="pix_idx_stats",
         n_pix=NPIX,
     )
-    metadata_rows_full = sys_res_full.loc[["total_input", "total_detected"]].copy()
+    metadata_rows_full = sys_res_full.loc[["total_detected"]].copy()
     sys_res_data_full = sys_res_full.reindex(SEEN_idx).fillna(0)
     sys_res_final_full = pd.concat([sys_res_data_full, metadata_rows_full])
     
@@ -763,11 +751,10 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
                 z,
                 edges,
                 weight_col=tomo_col,
-                sim_truth=sim_truth,
                 pix_col="pix_idx_stats",
                 n_pix=NPIX,
             )
-            meta_i = sys_res_i.loc[["total_input", "total_detected"]].copy()
+            meta_i = sys_res_i.loc[["total_detected"]].copy()
             sys_res_i_data = sys_res_i.reindex(SEEN_idx).fillna(0)
             sys_res_i_final = pd.concat([sys_res_i_data, meta_i])
             
@@ -782,29 +769,48 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
     return results
 
 
+def compute_detection_fractions(n_det_pix, n_input_pix):
+    """Compute global and per-pixel detection fractions.
+
+    frac      = sum(n_det_pix) / sum(n_input_pix)   (global)
+    frac_pix  = n_det_pix / n_input_pix               (per-pixel)
+    """
+    n_det_pix = np.asarray(n_det_pix, dtype=float)
+    n_input_pix = np.asarray(n_input_pix, dtype=float)
+
+    n_total = n_input_pix.sum()
+    frac = n_det_pix.sum() / n_total if n_total > 0 else 0.0
+
+    frac_pix = np.divide(
+        n_det_pix, n_input_pix,
+        out=np.zeros_like(n_det_pix, dtype=float),
+        where=n_input_pix > 0,
+    )
+
+    return frac, frac_pix
+
+
 def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
     """Package dN/dz-derived statistics for downstream outputs."""
     dndzs = sys_res.drop(["sum_num", "std_z_pix"], axis=1)
-    if "total_input" in dndzs.index:
-        dndzs = dndzs.drop(["total_input", "total_detected"])
+    if "total_detected" in dndzs.index:
+        dndzs = dndzs.drop(["total_detected"])
     
     dndzs = dndzs.to_numpy()
-    sum_num = sys_res["sum_num"].drop(["total_input", "total_detected"]).values
-    if n_input_pix is not None:
-        n_input_pix = np.asarray(n_input_pix, dtype=float)
-        frac_pix = np.divide(sum_num, n_input_pix, out=np.zeros_like(sum_num, dtype=float), where=n_input_pix > 0)
-    else:
-        frac_pix = sum_num / N_POP_SAMPLE
-    std_z_pix = sys_res["std_z_pix"].drop(["total_input", "total_detected"]).values
+    sum_num = sys_res["sum_num"].drop(["total_detected"]).to_numpy(dtype=float)
+    if n_input_pix is None:
+        n_input_pix = np.full_like(sum_num, N_POP_SAMPLE)
+    frac, frac_pix = compute_detection_fractions(sum_num, n_input_pix)
+    std_z_pix = sys_res["std_z_pix"].drop(["total_detected"]).values
     
-    dndz_in = sys_res.drop(["sum_num", "std_z_pix"], axis=1).loc["total_input"].to_numpy().astype(float)
     dndz_det = sys_res.drop(["sum_num", "std_z_pix"], axis=1).loc["total_detected"].to_numpy().astype(float)
-    frac = sys_res.loc["total_detected", "sum_num"] / sys_res.loc["total_input", "sum_num"]
     std_z_global = sys_res.loc["total_detected", "std_z_pix"]
 
     z_std_ratio = sys_res.attrs.get('z_std_ratio', 1.0)
     min_count = int(config.STATS_PARAMS.get('min_count', 0))
     valid_pix = sum_num > min_count
+    n_valid_pix = int(np.sum(valid_pix))
+    n_total_pix = len(sum_num)
 
     # Unsmoothed baseline stats using the active min_count mask.
     if np.any(valid_pix):
@@ -830,7 +836,6 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
         print(f"Smoothing {dndzs.shape[0]} distributions...")
         sigma_dz = config.ANALYSIS_SETTINGS['smoothing_sigma_dz']
         sm_dndzs = smooth_nz_preserve_moments(z, dndzs, sigma_dz=sigma_dz)
-        sm_dndz_in = smooth_nz_preserve_moments(z, dndz_in, sigma_dz=sigma_dz)
         sm_dndz_det = smooth_nz_preserve_moments(z, dndz_det, sigma_dz=sigma_dz)
         
         # Recompute widths for smoothed distributions with the same min_count mask.
@@ -852,7 +857,7 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
             sm_z_std_ratio_binned = 1.0
 
         return {
-            'z': z, 'dndzs': sm_dndzs, 'dndz_in': sm_dndz_in, 'dndz_det': sm_dndz_det,
+            'z': z, 'dndzs': sm_dndzs, 'dndz_det': sm_dndz_det,
             'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
             'z_std_ratio': z_std_ratio, 
             'z_std_ratio_weighted': z_std_ratio_weighted,
@@ -861,11 +866,12 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
             'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
             'geo_width_pix': sm_geo_w_pix, 'geo_width_global': sm_geo_w_glob, 
             'geo_enhancement': sm_geo_enhancement,
-            'geo_enhancement_unsmoothed': geo_enhancement
+            'geo_enhancement_unsmoothed': geo_enhancement,
+            'n_valid_pix': n_valid_pix, 'n_total_pix': n_total_pix,
         }
     else:
         return {
-            'z': z, 'dndzs': dndzs, 'dndz_in': dndz_in, 'dndz_det': dndz_det,
+            'z': z, 'dndzs': dndzs, 'dndz_det': dndz_det,
             'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
             'z_std_ratio': z_std_ratio, 
             'z_std_ratio_weighted': z_std_ratio_weighted,
@@ -874,20 +880,19 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
             'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
             'geo_width_pix': geo_w_pix, 'geo_width_global': geo_w_glob, 
             'geo_enhancement': geo_enhancement,
-            'geo_enhancement_unsmoothed': geo_enhancement
+            'geo_enhancement_unsmoothed': geo_enhancement,
+            'n_valid_pix': n_valid_pix, 'n_total_pix': n_total_pix,
         }
 
 def save_fits_output(stats, bin_idx=4):
     """Store final results in a multi-HDU FITS file."""
-    # Keep bin naming consistent with downstream notebooks.
-    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE_STATS, N_POP_SAMPLE, bin_idx)
+    output_fits_path = utils.get_output_path("nz_bin_fits", bin_idx=bin_idx)
     os.makedirs(os.path.dirname(output_fits_path), exist_ok=True)
     
     hdus = [
         fits.PrimaryHDU(),
         fits.ImageHDU(stats['z'], name='Z'),
         fits.ImageHDU(stats['dndzs'], name='DNDZS'),
-        fits.ImageHDU(stats['dndz_in'], name='DNDZ_IN'),
         fits.ImageHDU(stats['dndz_det'], name='DNDZ_DET'),
         fits.ImageHDU([stats['frac']], name='FRAC'),
         fits.ImageHDU(stats['frac_pix'], name='FRAC_PIX'),
@@ -904,7 +909,7 @@ def save_fits_output(stats, bin_idx=4):
 
 def load_fits_output(bin_idx=4):
     """Load results from a multi-HDU FITS file."""
-    output_fits_path = OUTPUT_FITS_TEMPLATE.format(SYS_NSIDE_STATS, N_POP_SAMPLE, bin_idx)
+    output_fits_path = utils.get_output_path("nz_bin_fits", bin_idx=bin_idx)
     if not os.path.exists(output_fits_path):
         print(f"Warning: FITS file {output_fits_path} not found.")
         return None
@@ -913,7 +918,6 @@ def load_fits_output(bin_idx=4):
         stats = {
             'z': hdul['Z'].data,
             'dndzs': hdul['DNDZS'].data,
-            'dndz_in': hdul['DNDZ_IN'].data,
             'dndz_det': hdul['DNDZ_DET'].data,
             'frac': hdul['FRAC'].data[0],
             'frac_pix': hdul['FRAC_PIX'].data,
@@ -952,7 +956,7 @@ def main():
              print(f"Predictions file {OUTPUT_PREDS} not found. Running simulation...")
         gal_cat = load_and_filter_catalog()
         
-        chunk_files, SEEN_idx, SEEN_idx_SIM, sim_truth = simulate_and_classify_chunked(gal_cat, z=z, edges=edges)
+        chunk_files, SEEN_idx, SEEN_idx_SIM = simulate_and_classify_chunked(gal_cat, z=z, edges=edges, output_dir=output_dir)
         
         # Consolidate detected galaxies (detected-only catalog is much smaller).
         print(f"Re-assembling {len(chunk_files)} detected-only chunks...")
@@ -965,7 +969,7 @@ def main():
         print("Final processing of consolidated catalog...")
         cla_cat = process_classified_catalog(cla_cat)
 
-        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges, sim_truth=sim_truth)
+        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
             
         print(f"    Memory usage after re-assembly and processing: {get_memory_usage():.2f} GB")
         
@@ -980,11 +984,11 @@ def main():
             
         print(f"    Memory usage at end of simulation: {get_memory_usage():.2f} GB")
     
-    plt_nz.save_diagnostic_plots(results, output_dir)
+    # plt_nz.save_diagnostic_plots(results, output_dir)
     plt_nz.plot_tomographic_bins(results, output_dir)
-    plt_nz.plot_snr_fractions(cla_cat, output_dir, z=z, edges=edges)
+    # plt_nz.plot_snr_fractions(cla_cat, output_dir, z=z, edges=edges)
     plt_nz.plot_pixel_std_histograms(results, output_dir)
-    plt_nz.plot_geo_vs_std_scatter(results, output_dir)
+    # plt_nz.plot_geo_vs_std_scatter(results, output_dir)
     # plt_nz.plot_photoz_weight_histograms(cla_cat, output_dir)
     # plt_nz.plot_dm_c_comparison_objects(cla_cat, output_dir)
     # plt_nz.plot_z_distribution_comparison(cla_cat, output_dir, z=z, edges=edges)
@@ -998,10 +1002,15 @@ def main():
             save_fits_output(results[f'tomo_{i}'], bin_idx=i)
 
     print("\n--- Enhancement Factor Results ---")
-    print(f"{'Bin':<12} | {'GeoEnh(Sm)':<10} | {'GeoEnh(Unsm)':<12} | {'zStd(Unw)':<10} | {'zStd(Wtd)':<10} | {'Binned(Sm)':<10} | {'Binned(Unsm)':<12}")
-    print("-" * 100)
+    print(f"(min_count={config.STATS_PARAMS.get('min_count', 0)}; "
+          f"fractions use ALL footprint pixels; enhancement factors use only valid pixels)")
+    print(f"{'Bin':<12} | {'Pix(v/t)':<12} | {'Frac':<8} | {'GeoEnh(Sm)':<10} | {'GeoEnh(Unsm)':<12} | {'zStd(Unw)':<10} | {'zStd(Wtd)':<10} | {'Binned(Sm)':<10} | {'Binned(Unsm)':<12}")
+    print("-" * 130)
     for key, stats in results.items():
+        pix_str = f"{stats.get('n_valid_pix', '?')}/{stats.get('n_total_pix', '?')}"
         print(f"{key:<12} | "
+              f"{pix_str:<12} | "
+              f"{stats.get('frac', 0.0):.4f}   | "
               f"{stats.get('geo_enhancement', 1.0):.4f}     | "
               f"{stats.get('geo_enhancement_unsmoothed', 1.0):.4f}       | "
               f"{stats.get('z_std_ratio', 1.0):.4f}     | "

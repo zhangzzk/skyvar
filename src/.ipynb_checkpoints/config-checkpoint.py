@@ -6,9 +6,9 @@ import numpy as np
 # ==============================================================================
 # Compute resources and HEALPix resolution.
 SIM_SETTINGS = {
-    'sys_nside_sim': 1024,     # High-res nside for simulated maps.
-    'sys_nside_stats': 256,   # Nside used when grouping pixel-level statistics.
-    'n_pop_sample': 60_000,  # Number of simulated galaxies per sim pixel.
+    'sys_nside_sim': 64,     # High-res nside for simulated maps.
+    'sys_nside_stats': 64,   # Nside used when grouping patch-level statistics.
+    'n_pop_sample': 500_000,  # Number of simulated galaxies per sim pixel.
     'chunk_size': 250_000_000,
     'n_jobs': -1,  # Parallel workers (-1 uses all available).
     'detection_threshold': 0.2, # Detection-probability threshold.
@@ -23,39 +23,44 @@ PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
 
 PATHS = {
     'gal_cat': os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
+    'mock_sys_map': os.path.join(BASE_DIR, f"data/mock_sys_map_{SIM_SETTINGS['sys_nside_sim']}.fits"),
     'model_json': "/home/z/Zekang.Zhang/optuna_study/models/classification_model_f24_rescaled_neighbor.json",
     'boundary_npy': "/home/z/Zekang.Zhang/optuna_study/models/train_boundary_f24_cla_neighbor.npy",
-    'data_dir': os.path.join(BASE_DIR, "data"),
-    'sys_preds_dir': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds"),
+    'output_preds': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/mock_sys_preds_sim{SIM_SETTINGS['sys_nside_sim']}_full_{SIM_SETTINGS['n_pop_sample']}.feather"),
+    'output_fits_template': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds/sys_{}_{}_nz_bins/{}.fits"),
+    'w_theta_fits': os.path.join(PROJECT_DATA_DIR, f"proj2_sims/sys_preds/w_theta_stats{SIM_SETTINGS['sys_nside_stats']}.fits"),
 }
 
 # ==============================================================================
 # 2. SYSTEMATICS CONFIGURATION (systematics.py)
 # ==============================================================================
 # Parameters used to generate mock systematics maps.
-TILE_SIZE = 1.0
 SYSTEMATICS_CONFIG = {
     'footprint': {
-        'ra_range': [170, 220],
-        'dec_range': [-10, 10],
+        'ra_range': [140, 240],
+        'dec_range': [-6, 6],
     },
     'tiles': {
-        'size_deg': TILE_SIZE,
+        'size_deg': 2.0,
     },
     'noise': {
-        'mu0': 6.0,            # Global mean pixel noise.
-        'sigma_corr': 0.5,     # Correlated large-scale scatter.  
-        'l_corr': 6.0,        # Correlation length [deg].        
-        'sigma_uncorr': 0.6,   # Uncorrelated tile-to-tile scatter.  
-        'sigma_pix': 0.02,      # Small pixel-level jitter.
+        'mu0': 6.0,        # Global mean pixel noise.
+        'sigma_tile': 0.8, # Tile-to-tile scatter.
+        'sigma_pix': 0.05   # Small pixel-level jitter.
     },
     'psf': {
-        'mu0': 0.7,            # Global baseline (median seeing).
-        'sigma_corr': 0.03,    # Correlated large-scale scatter.  
-        'l_corr': 6.0,        # Correlation length [deg].        
-        'sigma_uncorr': 0.08,  # Uncorrelated tile-to-tile scatter.  
-        'intra_scale': TILE_SIZE,    # Intra-tile Gaussian bump scale [deg].  
-        'sigma_pix': 0.02,     # Small pixel-level noise.
+        'mu0': 0.7,           # Global baseline (median seeing).
+        'sigma_tile': 0.07,   # Scatter in mean PSF across tiles.
+        'Abar': -0.08,        # Mean intra-tile amplitude.
+        'sigma_A': 0.04,      # Scatter of intra-tile amplitude.
+        'sigma_pix': 0.02,    # Small pixel-level noise.
+        'xmean_fluc': 0.15,
+        'ymean_fluc': 0.15,
+        'covxx_mean': 10,
+        'covyy_mean': 10,
+        'covxx_fluc': 2,
+        'covyy_fluc': 2,
+        'covxy_fluc': 4,
     },
 }
 
@@ -130,51 +135,4 @@ CLUSTERING_SETTINGS = {
     'theta_min_deg': 0.01,
     'theta_max_deg': 10.0,
     'theta_bins': 30,
-}
-
-# ==============================================================================
-# 5. DENSITY VARIATION CONFIGURATION (density_variation.py)
-# ==============================================================================
-# TODO: verify all values below — reconstructed from code signatures.
-DENSITY_SETTINGS = {
-    'external': {
-        'tiaogeng_path': '/home/z/Zekang.Zhang/tiaogeng',
-        'gls_filename': 'gls.txt',
-    },
-    'mock': {
-        'bias': 1.0,
-        'glass_nside': 256,
-        'n_arcmin2': 30.0,
-        'z_min': 0.0,
-        'z_max': 2.0,
-        'z_samples': 200,
-        'dndz_mean': 0.7,
-        'dndz_sigma': 0.3,
-        'shell_dz': 0.1,
-        'window_dz': 0.1,
-        'footprint': {
-            'dx': 1.0,
-            'dy': 1.0,
-            'nlon': 100,
-            'nlat': 10,
-            'start_lon': 140.0,
-            'start_lat': -5.0,
-        },
-    },
-    'treecorr': {
-        'n_patches': 50,
-        'n_threads': -1,
-        'gal_nside': 1024,
-        'nbins': 15,
-        'min_sep_arcmin': 1.0,
-        'max_sep_arcmin': 300.0,
-        'var_method': 'jackknife',
-    },
-    'theory': {
-        'ell_max': 3000,
-        'ell_samples': 3001,
-    },
-    'catalog': {
-        'seed': 42,
-    },
 }

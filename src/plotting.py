@@ -251,16 +251,24 @@ def plot_all_comparisons(all_results, geometric_factors, output_dir):
     plt.savefig(save_path)
     plt.close()
 
-def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None, ax=None):
-    """Plot HEALPix map for seen pixels."""
-    if s is None:
-        s = 5
-        s = np.clip(s, 0.1, 100)
+def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
+            ax=None, ra_range=None, dec_range=None, cbar_ax=None,
+            vmin=None, vmax=None, fig_width_in=None):
+    """Plot HEALPix map for seen pixels.
 
+    Parameters
+    ----------
+    fig_width_in : float, optional
+        Width of the map axes in inches (used to compute adaptive marker
+        size).  When *None* the marker size falls back to a default.
+    """
     n_pix = hp.nside2npix(sys_nside)
     lon, lat = hp.pix2ang(sys_nside, np.arange(n_pix), lonlat=True)
 
-    vmin, vmax = np.percentile(map_data[mask], [2, 98])
+    if vmin is None or vmax is None:
+        vmin_, vmax_ = np.percentile(map_data[mask], [0.1, 99.9])
+        vmin = vmin if vmin is not None else vmin_
+        vmax = vmax if vmax is not None else vmax_
     norm_scale = Normalize(vmin=vmin, vmax=vmax)
 
     if ax is None:
@@ -270,16 +278,46 @@ def plt_map(map_data, sys_nside, mask, label='value', s=None, save_path=None, ax
     else:
         show_plot = False
 
-    sc = ax.scatter(lon[mask], lat[mask], c=map_data[mask], s=s, cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none')
-    plt.colorbar(sc, ax=ax, label=label)
+    # Adaptive marker size: make each HEALPix pixel fill its area.
+    pix_res_deg = np.degrees(hp.nside2resol(sys_nside))  # pixel spacing
+    if ra_range is not None:
+        ra_span = max(ra_range) - min(ra_range)
+    else:
+        ra_span = lon[mask].max() - lon[mask].min() + 2
+    if fig_width_in is None:
+        fig_width_in = ax.get_figure().get_figwidth()
+    dpi = ax.get_figure().dpi
+    # marker diameter in points, then square for area
+    marker_pts = pix_res_deg / ra_span * fig_width_in * 72
+    s = marker_pts ** 2 *2
+
+    sc = ax.scatter(lon[mask], lat[mask], c=map_data[mask], s=s,
+                    cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none',
+                    marker='s', rasterized=True)
+
+    # cbar_ax=None → no colorbar; explicit Axes → draw into it
+    if cbar_ax is not None:
+        plt.colorbar(sc, cax=cbar_ax, label=label)
+    elif label is not None:
+        plt.colorbar(sc, ax=ax, label=label, fraction=0.02, pad=0.02)
+
     ax.set_xlabel("RA [deg]")
     ax.set_ylabel("Dec [deg]")
-    ax.set_xlim(240, 140)
-    ax.set_ylim(-5, 5)
-    
+
+    if ra_range is not None:
+        ax.set_xlim(max(ra_range), min(ra_range))   # RA decreases left→right
+    else:
+        ax.set_xlim(lon[mask].max() + 1, lon[mask].min() - 1)
+    if dec_range is not None:
+        ax.set_ylim(min(dec_range), max(dec_range))
+    else:
+        ax.set_ylim(lat[mask].min() - 1, lat[mask].max() + 1)
+
+    ax.set_aspect('equal')
+
     if save_path:
         plt.savefig(save_path)
-    
+
     if show_plot:
         plt.close()
 
@@ -608,33 +646,98 @@ def plot_systematics_histograms(maps, labels, mask, output_path):
     plt.savefig(output_path, dpi=150)
     plt.close()
 
-def plot_systematics_overview(maps, labels, nside, mask, output_path):
-    """Plot maps and histograms for multiple systematics side-by-side (panel by panel)."""
+def _colorbar_histogram(ax, data, label, cmap=plt.cm.coolwarm, vmin=None, vmax=None):
+    """Draw an integrated colorbar+histogram: gradient background with KDE silhouette."""
+    from scipy.ndimage import gaussian_filter1d
+
+    if vmin is None:
+        vmin = np.percentile(data, 2)
+    if vmax is None:
+        vmax = np.percentile(data, 98)
+
+    # Histogram counts for the filled silhouette
+    bins = np.linspace(vmin, vmax, 80)
+    counts, edges = np.histogram(data, bins=bins, density=True)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    smooth = gaussian_filter1d(counts, sigma=2)
+
+    # Gradient background image
+    gradient = np.linspace(0, 1, 256).reshape(1, -1)
+    ax.imshow(gradient, aspect='auto', cmap=cmap,
+              extent=[vmin, vmax, 0, smooth.max() * 1.15], origin='lower')
+
+    # Filled histogram silhouette (semi-transparent grey)
+    ax.fill_between(centers, 0, smooth, color='grey', alpha=0.45)
+    ax.plot(centers, smooth, color='k', linewidth=1.2)
+
+    ax.set_xlim(vmin, vmax)
+    ax.set_ylim(0, smooth.max() * 1.15)
+    ax.set_xlabel(label)
+    ax.set_yticks([])
+
+
+def plot_systematics_overview(maps, labels, nside, mask, output_path,
+                              ra_range=None, dec_range=None,
+                              hist_vlims=None):
+    """Plot maps with integrated colorbar-histogram panels.
+    """
     n_maps = len(maps)
-    fig, axes = plt.subplots(n_maps, 2, figsize=(14, 3 * n_maps), 
-                             gridspec_kw={'width_ratios': [3.5, 1]})
-    
-    if n_maps == 1:
-        axes = axes[np.newaxis, :]
-        
-    colors = ['royalblue', 'coral', 'mediumseagreen']
-    
+    n_pix = hp.nside2npix(nside)
+    lon, lat = hp.pix2ang(nside, np.arange(n_pix), lonlat=True)
+    if ra_range is None:
+        ra_lo, ra_hi = lon[mask].min(), lon[mask].max()
+    else:
+        ra_lo, ra_hi = min(ra_range), max(ra_range)
+    if dec_range is None:
+        dec_lo, dec_hi = lat[mask].min(), lat[mask].max()
+    else:
+        dec_lo, dec_hi = min(dec_range), max(dec_range)
+    ra_span = ra_hi - ra_lo
+    dec_span = dec_hi - dec_lo
+
+    if hist_vlims is None:
+        hist_vlims = [None] * n_maps
+
+    # Layout: place axes manually so that the histogram panel
+    # exactly matches the rendered map height (after aspect='equal').
+    map_frac = 0.75          # fraction of fig width for the map
+    hist_frac = 0.15         # fraction of fig width for the histogram
+    gap = 0.06               # horizontal gap between map and hist
+    row_aspect = dec_span / ra_span   # height/width of the map content
+
+    map_width_in = 12.0
+    row_h_in = map_width_in * map_frac * row_aspect
+    vgap_in = 0.6            # vertical gap between rows (inches)
+    margin_top = 0.2         # top margin (inches)
+    margin_bot = 0.5         # bottom margin for xlabel (inches)
+    fig_h = n_maps * row_h_in + (n_maps - 1) * vgap_in + margin_top + margin_bot
+
+    fig = plt.figure(figsize=(map_width_in, fig_h))
+
     for i, (map_data, label) in enumerate(zip(maps, labels)):
-        # Map panel (Column 0)
-        plt_map(map_data, nside, mask, label=label, ax=axes[i, 0])
-        
-        # Histogram panel (Column 1)
+        # Vertical position (top to bottom), respecting margins
+        row_bottom = (margin_bot + (n_maps - 1 - i) * (row_h_in + vgap_in)) / fig_h
+
+        ax_map = fig.add_axes([0.06, row_bottom, map_frac, row_h_in / fig_h])
+        ax_cb  = fig.add_axes([0.06 + map_frac + gap, row_bottom,
+                               hist_frac, row_h_in / fig_h])
+
         data = map_data[mask]
         data = data[~np.isnan(data)]
-        axes[i, 1].hist(data, bins=50, color=colors[i % len(colors)], 
-                          alpha=0.7, edgecolor='black', density=True)
-        axes[i, 1].set_title(f"{label} Distribution")
-        axes[i, 1].set_xlabel("Value")
-        axes[i, 1].set_ylabel("Density")
-        axes[i, 1].grid(True, linestyle='--', alpha=0.6)
-        
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
+
+        if hist_vlims[i] is not None:
+            vmin, vmax = hist_vlims[i]
+        else:
+            vmin, vmax = np.percentile(data, [0.1, 99.9])
+
+        plt_map(map_data, nside, mask, label=None, ax=ax_map,
+                ra_range=(ra_lo, ra_hi), dec_range=(dec_lo, dec_hi),
+                cbar_ax=None, vmin=vmin, vmax=vmax,
+                fig_width_in=map_width_in * map_frac)
+
+        _colorbar_histogram(ax_cb, data, label, vmin=vmin, vmax=vmax)
+
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
     plt.close()
 
 def plot_systematics_vs_metrics(sys_maps, sys_labels, metrics, metric_labels, seen_idx, output_dir, prefix="sys_vs"):
@@ -716,7 +819,6 @@ def save_diagnostic_plots(results, output_dir, key='full'):
         plt.plot(z, dndzs[i], color='gray', alpha=0.2, lw=0.5)
 
     plt.plot(z, stats['dndz_det'], 'r-', lw=2, label='Mean Detected')
-    plt.plot(z, stats['dndz_in'], 'k--', lw=1.5, label='Input (Truth)')
     
     plt.xlabel('Redshift $z$')
     plt.ylabel('$n(z)$')
@@ -850,6 +952,24 @@ def plot_z_distribution_comparison(cla_cat, output_dir, z=None, edges=None):
     plt.savefig(plot_path)
     plt.close()
     print(f"Z-distribution comparison plot saved to {plot_path}")
+
+
+def plot_input_dndz(z, dndz_in, output_dir):
+    """
+    Plot and save the input (pre-selection) redshift distribution.
+    """
+    plt.figure(figsize=(8, 5))
+    plt.plot(z, dndz_in, 'k-', lw=2, label='Input (pre-selection)')
+    plt.xlabel('Redshift $z$', fontsize=12)
+    plt.ylabel('$dN/dz$ (normalized)', fontsize=12)
+    plt.title('Input Redshift Distribution', fontsize=14)
+    plt.legend(fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    save_path = os.path.join(output_dir, 'input_dndz.png')
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    print(f"Input dN/dz plot saved to {save_path}")
 
 
 # ============================================================================
