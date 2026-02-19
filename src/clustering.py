@@ -1,6 +1,7 @@
 import os
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -8,10 +9,14 @@ import numpy as np
 import pyccl as ccl
 import healpy as hp
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class EnhancementResult:
     delta_w: np.ndarray
+    delta_w_1: np.ndarray  # Contribution from term1 + term1_2
+    delta_w_2: np.ndarray  # Contribution from term2
     w_model: np.ndarray
     w_true: np.ndarray
     w_selection: Optional[np.ndarray]
@@ -99,7 +104,8 @@ class ClusteringEnhancement:
         theta_deg: np.ndarray,
         nside: int,
         seen_idx: np.ndarray,
-    ) -> np.ndarray:
+        auto_only: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Compute the selection correlation matrix delta_w_nz[i, j]."""
         n_maps = np.asarray(n_maps, dtype=float)
         nbar = np.asarray(nbar, dtype=float)
@@ -110,7 +116,8 @@ class ClusteringEnhancement:
         lmax = min(self.ell_max, lmax_map)
         fsky = len(seen_idx) / npix if npix > 0 else 0
 
-        delta_w_nz = np.zeros((nz, nz, len(theta_rad)))
+        delta_w_nz_1 = np.zeros((nz, nz))
+        delta_w_nz_2 = np.zeros((nz, nz, len(theta_rad)))
         # Mean over pixels for each bin.
         local_means = np.mean(n_maps, axis=1)
 
@@ -122,21 +129,25 @@ class ClusteringEnhancement:
             alms.append(hp.map2alm(full_delta_map_i, lmax=lmax))
 
         for i in range(nz):
-            for j in range(i, nz):
+            j_range = [i] if auto_only else range(i, nz)
+            for j in j_range:
                 term1 = nbar[i] * (local_means[i] - nbar[i])
-                term2 = nbar[j] * (local_means[j] - nbar[j])
+                term1_2 = nbar[j] * (local_means[j] - nbar[j])
+                val1 = term1 + term1_2
 
                 cl_ij = hp.alm2cl(alms[i], alms[j])
                 if fsky > 0:
                     cl_ij /= fsky
 
-                term3 = self._cl_to_wtheta_fullsky(cl_ij, theta_rad, min(self.ell_min, lmax))
-                val = term1 + term2 + term3
-                delta_w_nz[i, j] = val
-                if i != j:
-                    delta_w_nz[j, i] = val
+                val2 = self._cl_to_wtheta_fullsky(cl_ij, theta_rad, min(self.ell_min, lmax))
+                
+                delta_w_nz_1[i, j] = val1
+                delta_w_nz_2[i, j] = val2
+                if not auto_only and i != j:
+                    delta_w_nz_1[j, i] = val1
+                    delta_w_nz_2[j, i] = val2
         
-        return delta_w_nz
+        return delta_w_nz_1, delta_w_nz_2
 
     def _get_bin_tracer(self, z_support, z_lo, z_hi, dz, bias=None):
         W = np.zeros_like(z_support)
@@ -161,6 +172,7 @@ class ClusteringEnhancement:
         theta_deg: np.ndarray,
         bias: Optional[np.ndarray] = None,
         nz: Optional[int] = None,
+        auto_only: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Compute the full [Nz, Nz, Ntheta] matter-correlation matrix."""
         z = np.asarray(z, dtype=float)
@@ -186,11 +198,11 @@ class ClusteringEnhancement:
         dz_bins = np.diff(z_edges)
         nz_bins = len(dz_bins)
         
-        cache_key = (tuple(z_edges.tolist()), tuple(theta_deg.tolist()))
+        cache_key = (tuple(z_edges.tolist()), tuple(theta_deg.tolist()), auto_only)
         if cache_key in self._cache_w_mat:
             return self._cache_w_mat[cache_key], z_mid, dz_bins
 
-        print(f"Computing {nz_bins}x{nz_bins} shell correlations (CCL matrix)...")
+        logger.info("Computing %dx%d shell correlations (CCL matrix)...", nz_bins, nz_bins)
         w_mat = np.zeros((nz_bins, nz_bins, len(theta_deg)), dtype=float)
         
         zmin, zmax = float(z_edges[0]), float(z_edges[-1])
@@ -204,14 +216,16 @@ class ClusteringEnhancement:
         # Full cross-correlation is expensive; optimize later if needed.
         ell = np.arange(self.ell_max + 1, dtype=int)
         for i in range(nz_bins):
-            for j in range(i, nz_bins):
+            j_range = [i] if auto_only else range(i, nz_bins)
+            for j in j_range:
                 cls = ccl.angular_cl(self.cosmo, tracers[i], tracers[j], ell)
                 if self.ell_min > 0:
                     cls[: self.ell_min] = 0.0
                 
                 w_ij = self._ccl_correlation_compat(self.cosmo, ell, cls, theta_deg)
                 w_mat[i, j, :] = w_ij
-                w_mat[j, i, :] = w_ij
+                if not auto_only and i != j:
+                    w_mat[j, i, :] = w_ij
         
         self._cache_w_mat[cache_key] = w_mat
         return w_mat, z_mid, dz_bins
@@ -224,6 +238,7 @@ class ClusteringEnhancement:
         theta_deg: np.ndarray,
         bias: Optional[np.ndarray] = None,
         selection_mode: str = "wtheta",
+        auto_only: bool = False,
         nside: Optional[int] = None,
         seen_idx: Optional[np.ndarray] = None,
         weights: Optional[np.ndarray] = None,
@@ -256,24 +271,28 @@ class ClusteringEnhancement:
             theta_deg,
             bias=bias,
             nz=nz,
+            auto_only=auto_only,
         )
 
         selection_mode = selection_mode.lower()
         if selection_mode not in ("wtheta", "variance"):
             raise ValueError("selection_mode must be 'wtheta' or 'variance'.")
 
-        print(f"Computing {nz}x{nz} angular expansion terms (anafast matrix)...")
-        # delta_w_matrix shape: (nz, nz, ntheta).
-        delta_w_matrix = self.selection_wtheta_from_map(
-            n_maps, nbar, theta_deg, nside=nside, seen_idx=seen_idx
+        logger.info("Computing %dx%d angular expansion terms (anafast matrix)...", nz, nz)
+        # delta_w_matrix shape: (nz, nz) for term1 and (nz, nz, ntheta) for term2.
+        delta_w_matrix_1, delta_w_matrix_2 = self.selection_wtheta_from_map(
+            n_maps, nbar, theta_deg, nside=nside, seen_idx=seen_idx, auto_only=auto_only
         )
         
         # Apply integration weights dz_i * dz_j.
         dz_matrix = dz[:, None] * dz[None, :]
-        w_selection = delta_w_matrix * dz_matrix[:, :, None]
+        w_selection_1 = delta_w_matrix_1 * dz_matrix
+        w_selection_2 = delta_w_matrix_2 * dz_matrix[:, :, None]
         
         # delta_w(theta) = Sum_{i,j} w_selection[i,j,theta] * w_mat[i,j,theta].
-        delta_w = np.einsum("ijk,ijk->k", w_selection, w_mat)
+        delta_w_1 = np.einsum("ij,ijk->k", w_selection_1, w_mat)
+        delta_w_2 = np.einsum("ijk,ijk->k", w_selection_2, w_mat)
+        delta_w = delta_w_1 + delta_w_2
         
         # Compute w_model using full shell-matrix summation.
         weights = nbar * dz
@@ -287,9 +306,11 @@ class ClusteringEnhancement:
 
         return EnhancementResult(
             delta_w=delta_w,
+            delta_w_1=delta_w_1,
+            delta_w_2=delta_w_2,
             w_model=w_model,
             w_true=w_true,
-            w_selection=w_selection,
+            w_selection=w_selection_1[:, :, None] + w_selection_2,
             w_mat=w_mat,
             var_n=var_n,
             nbar=nbar,

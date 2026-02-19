@@ -1,9 +1,12 @@
 import os
+import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import healpy as hp
 import pyccl as ccl
 from matplotlib.colors import Normalize
+
+logger = logging.getLogger(__name__)
 
 try:
     from . import config
@@ -830,7 +833,7 @@ def save_diagnostic_plots(results, output_dir, key='full'):
 def plot_dm_c_comparison_objects(cla_cat, output_dir):
     """Plot distribution and comparison of dm_c for individual objects."""
     if 'pixel_rms_input_p' not in cla_cat.columns or 'psf_fwhm_input_p' not in cla_cat.columns:
-        print("Warning: Systematic columns not found in catalog for dm_c plot.")
+        logger.warning("Systematic columns not found in catalog for dm_c plot.")
         return
 
     rms = cla_cat['pixel_rms_input_p']
@@ -920,7 +923,7 @@ def plot_dm_c_comparison_objects(cla_cat, output_dir):
     plot_path = os.path.join(output_dir, "dm_c_comparison_objects.png")
     plt.savefig(plot_path)
     plt.close()
-    print(f"Object-level comparison plot saved to {plot_path}")
+    logger.info("Object-level comparison plot saved to %s", plot_path)
 
 def plot_z_distribution_comparison(cla_cat, output_dir, z=None, edges=None):
     """Plot histograms of true redshift and photo-z (mu_g) together."""
@@ -951,7 +954,7 @@ def plot_z_distribution_comparison(cla_cat, output_dir, z=None, edges=None):
     plot_path = os.path.join(output_dir, "z_distribution_comparison.png")
     plt.savefig(plot_path)
     plt.close()
-    print(f"Z-distribution comparison plot saved to {plot_path}")
+    logger.info("Z-distribution comparison plot saved to %s", plot_path)
 
 
 def plot_input_dndz(z, dndz_in, output_dir):
@@ -969,7 +972,7 @@ def plot_input_dndz(z, dndz_in, output_dir):
     save_path = os.path.join(output_dir, 'input_dndz.png')
     plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"Input dN/dz plot saved to {save_path}")
+    logger.info("Input dN/dz plot saved to %s", save_path)
 
 
 # ============================================================================
@@ -1003,7 +1006,7 @@ def plot_density_histograms(values_list, labels, save_path=None):
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150)
-        print(f"Density histograms saved to {save_path}")
+        logger.info("Density histograms saved to %s", save_path)
     plt.close()
 
 
@@ -1033,7 +1036,7 @@ def plot_selection_cls(ell, cl, save_path=None):
 
     if save_path:
         plt.savefig(save_path, dpi=150)
-        print(f"Selection C_l plot saved to {save_path}")
+        logger.info("Selection C_l plot saved to %s", save_path)
     plt.close()
 
 
@@ -1093,5 +1096,73 @@ def plot_wtheta_comparison(wtheta_results, w_theory=None, save_path=None):
 
     if save_path:
         plt.savefig(save_path, dpi=150)
-        print(f"w(theta) comparison plot saved to {save_path}")
+        logger.info("w(theta) comparison plot saved to %s", save_path)
+    plt.close()
+
+def plot_delta_w_components(result, output_dir, filename="delta_w_components.png"):
+    """Plot comparison of delta_w components (total, term1, term2)."""
+    theta_arcmin = 60.0 * result.theta_deg
+    plt.figure(figsize=(8, 6))
+    
+    # delta_w can be small or negative, use symlog for better visibility
+    plt.plot(theta_arcmin, result.delta_w, "k-", lw=2.5, label=r"$\delta w$ (Total)")
+    plt.plot(theta_arcmin, result.delta_w_1, "r--", lw=2, label=r"$\delta w_1$ (Variation of mean density)")
+    plt.plot(theta_arcmin, result.delta_w_2, "b:", lw=2, label=r"$\delta w_2$ (Angular cross-correlation)")
+    
+    plt.axhline(0, color='gray', lw=1, ls='-', alpha=0.5)
+    
+    plt.xlabel(r"$\theta$ [arcmin]")
+    plt.ylabel(r"$\delta w(\theta)$")
+    plt.xscale("log")
+    
+    # Adaptive threshold for symlog
+    all_vals = np.concatenate([result.delta_w, result.delta_w_1, result.delta_w_2])
+    abs_vals = np.abs(all_vals[all_vals != 0])
+    if len(abs_vals) > 0:
+        linthresh = np.percentile(abs_vals, 10)
+        plt.yscale("symlog", linthresh=max(linthresh, 1e-9))
+    
+    plt.grid(True, alpha=0.3, which="both")
+    plt.legend()
+    plt.title(r"Decomposition of Clustering Enhancement $\delta w$")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_dir, filename))
+    plt.close()
+
+def plot_all_delta_w_components(all_results, output_dir, filename="delta_w_components_all.png"):
+    """Plot delta_w components for all results in a multi-panel figure."""
+    n_bins = len(all_results)
+    keys = list(all_results.keys())
+    
+    fig, axes = plt.subplots(1, n_bins, figsize=(6 * n_bins, 5), squeeze=False)
+    
+    for i, key in enumerate(keys):
+        res = all_results[key]
+        ax = axes[0, i]
+        theta_arcmin = 60.0 * res.theta_deg
+        
+        ax.plot(theta_arcmin, res.delta_w, "k-", lw=2, label=r"$\delta w$ (Tot)")
+        ax.plot(theta_arcmin, res.delta_w_1, "r--", lw=1.5, label=r"$\delta w_1$ (Shift)")
+        ax.plot(theta_arcmin, res.delta_w_2, "b:", lw=1.5, label=r"$\delta w_2$ (Clust)")
+        
+        ax.axhline(0, color='gray', lw=0.8, alpha=0.5)
+        ax.set_xscale("log")
+        
+        # Adaptive symlog
+        all_vals = np.concatenate([res.delta_w, res.delta_w_1, res.delta_w_2])
+        finite_vals = all_vals[np.isfinite(all_vals) & (all_vals != 0)]
+        if len(finite_vals) > 0:
+            linthresh = np.percentile(np.abs(finite_vals), 10)
+            ax.set_yscale("symlog", linthresh=max(linthresh, 1e-10))
+            
+        ax.grid(True, alpha=0.3, which="both")
+        ax.set_title(f"Bin: {key}")
+        ax.set_xlabel(r"$\theta$ [arcmin]")
+        if i == 0:
+            ax.set_ylabel(r"$\delta w(\theta)$")
+            ax.legend(fontsize=9, loc='best')
+            
+    plt.suptitle(r"Decomposition of Clustering Enhancement $\delta w$ Across Bins", fontsize=14)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(os.path.join(output_dir, filename), dpi=200)
     plt.close()

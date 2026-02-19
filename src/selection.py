@@ -1,6 +1,7 @@
 import os
 os.environ["NUMEXPR_MAX_THREADS"] = "128"
 import sys
+import logging
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -14,6 +15,8 @@ import xgboost as xgb
 import gc
 import psutil
 import time
+
+logger = logging.getLogger(__name__)
 
 
 def get_memory_usage():
@@ -55,7 +58,7 @@ try:
     import nz_utils
     from cosmic_toolbox import arraytools as at
 except ImportError as e:
-    print(f"Warning: Could not import some custom modules: {e}")
+    logger.warning("Could not import some custom modules: %s", e)
 
 # Constants loaded from config.
 SYS_NSIDE_SIM = config.SIM_SETTINGS['sys_nside_sim']
@@ -150,10 +153,10 @@ def groupby_dndz(sys_cat, z, edges, post_cut=None, weight_col=None, pix_col="pix
     else:
         z_std_ratio_weighted = 1.0
 
-    print(
-        f"[{label:10s}] Redshift-based std ratio: {z_std_ratio:.6f} "
-        f"(pix-wtd inverse: {z_std_ratio_weighted:.6f}; "
-        f"mean_std_pix={mean_std_z_pix_unweighted:.6f})"
+    logger.info(
+        "[%10s] Redshift-based std ratio: %.6f "
+        "(pix-wtd inverse: %.6f; mean_std_pix=%.6f)",
+        label, z_std_ratio, z_std_ratio_weighted, mean_std_z_pix_unweighted
     )
 
     out = pd.DataFrame(hist_raw, index=np.arange(n_pix))
@@ -321,7 +324,7 @@ def smooth_nz_preserve_moments(
 
 def load_and_filter_catalog():
     """Load the input catalog and apply baseline quality cuts."""
-    print(f"Loading catalog from {GAL_CAT_PATH}...")
+    logger.info("Loading catalog from %s...", GAL_CAT_PATH)
     gal_cat = at.rec2pd(at.load_hdf(GAL_CAT_PATH))
     gal_cat = gal_cat[['sersic_n', 'int_mag', 'int_r50_arcsec', 'z', 'e1', 'e2']].rename(columns={
         'int_mag': 'r',
@@ -350,13 +353,8 @@ def load_and_filter_catalog():
 
 def load_system_maps(return_sim_idx: bool = False):
     """Load system maps and return footprint indices on the stats grid.
-
-    Parameters
-    ----------
-    return_sim_idx : bool
-        If True, also return indices of valid pixels on simulation grid.
     """
-    print(f"Loading system maps from {MOCK_SYS_MAP_PATH}...")
+    logger.info("Loading system maps from %s...", MOCK_SYS_MAP_PATH)
     maps = hp.read_map(MOCK_SYS_MAP_PATH, field=None)
     seen_idx_sim = np.where(~np.isnan(maps[0]))[0]
 
@@ -570,7 +568,7 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
     z_bins_n = len(z)
 
     t_sim_total_start = time.perf_counter()
-    print("Loading XGBoost model...")
+    logger.info("Loading XGBoost model...")
     bst_cla = xgb.Booster({'device': 'cuda', 'n_jobs': -1})
     bst_cla.load_model(MODEL_JSON)
     
@@ -585,13 +583,13 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
     n_pixels = len(SEEN_idx_SIM)
     chunk_files = []
     
-    print(f"Starting chunked processing: {n_pixels} pixels in groups of {pixels_per_chunk}")
+    logger.info("Starting chunked processing: %d pixels in groups of %d", n_pixels, pixels_per_chunk)
     
     for start_p in range(0, n_pixels, pixels_per_chunk):
         end_p = min(start_p + pixels_per_chunk, n_pixels)
         block_indices = SEEN_idx_SIM[start_p:end_p]
         
-        print(f"  Chunk {start_p//pixels_per_chunk + 1}/{(n_pixels-1)//pixels_per_chunk + 1} ({len(block_indices)} pixels)")
+        logger.info("  Chunk %d/%d (%d pixels)", start_p//pixels_per_chunk + 1, (n_pixels-1)//pixels_per_chunk + 1, len(block_indices))
         
         # 1) Simulate this block.
         results = Parallel(n_jobs=N_JOBS, backend="threading")(
@@ -664,13 +662,13 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
                 block_cla.to_feather(temp_path)
                 chunk_files.append(temp_path)
         except Exception as e:
-            print(f"CRITICAL ERROR processing block {start_p}: {e}")
+            logger.error("CRITICAL ERROR processing block %d: %s", start_p, e)
             raise RuntimeError(f"Simulation failed at block {start_p}. Terminating for robustness.") from e
         
         block_fullset = None
         block_cla = None
         gc.collect()
-        print(f"    Memory usage: {get_memory_usage():.2f} GB")
+        logger.info("    Memory usage: %.2f GB", get_memory_usage())
 
     # Precompute global input density and counts.
     dz = np.diff(edges)
@@ -680,7 +678,7 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
     if output_dir:
         plt_nz.plot_input_dndz(z, dndz_in_total, output_dir)
         
-    print(f"Simulation+classification stage completed in {time.perf_counter() - t_sim_total_start:.1f}s")
+    logger.info("Simulation+classification stage completed in %.1fs", time.perf_counter() - t_sim_total_start)
     return chunk_files, SEEN_idx, SEEN_idx_SIM
 
 
@@ -695,7 +693,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
     # Total input count derived from the survey footprint geometry.
     # This is the authoritative denominator for all detection fractions.
     n_total_input = int(n_input_pix.sum())
-    print(f"Total input galaxies (from footprint): {n_total_input:,}")
+    logger.info("Total input galaxies (from footprint): %s", f"{n_total_input:,}")
 
     cla_cat = cla_cat.copy()
     cla_cat["pix_idx_stats"] = map_pix_sim_to_stats(
@@ -712,8 +710,8 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
 
     mean_p = np.full(NPIX, hp.UNSEEN)
     mean_p[SEEN_idx] = frac_det_pix
-    print(f"Detection Rate Stats: frac={frac_det:.4f}, "
-          f"min={np.min(frac_det_pix):.4f}, max={np.max(frac_det_pix):.4f}, mean={np.mean(frac_det_pix):.4f}")
+    logger.info("Detection Rate Stats: frac=%.4f, min=%.4f, max=%.4f, mean=%.4f",
+                frac_det, np.min(frac_det_pix), np.max(frac_det_pix), np.mean(frac_det_pix))
 
     plt_nz.plt_map(mean_p, SYS_NSIDE_STATS, SEEN_idx, 
             save_path=os.path.join(output_dir, "detection_rate_map.png"))
@@ -791,19 +789,30 @@ def compute_detection_fractions(n_det_pix, n_input_pix):
 
 
 def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
-    """Package dN/dz-derived statistics for downstream outputs."""
-    dndzs = sys_res.drop(["sum_num", "std_z_pix"], axis=1)
-    if "total_detected" in dndzs.index:
-        dndzs = dndzs.drop(["total_detected"])
+    """Normalize and package dN/dz statistics (trapezoidal integration)."""
+    dndzs_raw = sys_res.drop(["sum_num", "std_z_pix"], axis=1)
+    if "total_detected" in dndzs_raw.index:
+        dndzs_raw = dndzs_raw.drop(["total_detected"])
     
-    dndzs = dndzs.to_numpy()
+    dndzs_raw = dndzs_raw.to_numpy().astype(float)
+    # Ensure consistent trapezoidal normalization across all pixels
+    norms = np.trapezoid(dndzs_raw, z, axis=1)
+    dndzs = np.divide(dndzs_raw, norms[:, None], out=np.zeros_like(dndzs_raw), where=norms[:, None] > 0)
+
     sum_num = sys_res["sum_num"].drop(["total_detected"]).to_numpy(dtype=float)
     if n_input_pix is None:
         n_input_pix = np.full_like(sum_num, N_POP_SAMPLE)
     frac, frac_pix = compute_detection_fractions(sum_num, n_input_pix)
     std_z_pix = sys_res["std_z_pix"].drop(["total_detected"]).values
     
-    dndz_det = sys_res.drop(["sum_num", "std_z_pix"], axis=1).loc["total_detected"].to_numpy().astype(float)
+    dndz_det_raw = sys_res.drop(["sum_num", "std_z_pix"], axis=1).loc["total_detected"].to_numpy().astype(float)
+    dndz_det = dndz_det_raw / np.trapezoid(dndz_det_raw, z)
+    
+    # dndz_det_flat: Each galaxy is weighted by inverse frac_pix to remove selection-induced density variations.
+    # This simplifies to an area-weighted (n_input_pix) average of per-pixel normalized shapes.
+    dndz_det_flat_raw = np.sum(dndzs * n_input_pix[:, None], axis=0)
+    dndz_det_flat = dndz_det_flat_raw / np.trapezoid(dndz_det_flat_raw, z)
+
     std_z_global = sys_res.loc["total_detected", "std_z_pix"]
 
     z_std_ratio = sys_res.attrs.get('z_std_ratio', 1.0)
@@ -816,7 +825,7 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
     if np.any(valid_pix):
         dndzs_valid = dndzs[valid_pix]
         frac_pix_valid = frac_pix[valid_pix]
-        geo_w_pix_valid, geo_w_glob, geo_enhancement = utils.calculate_geometric_stats(
+        geo_w_pix_valid, geo_w_glob, geo_enh_det = utils.calculate_geometric_stats(
             z, dndzs_valid, dndz_det, frac_pix=frac_pix_valid
         )
         z_std_ratio_binned = utils.calculate_binned_std_ratio(
@@ -828,21 +837,22 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
     else:
         geo_w_pix = np.zeros_like(frac_pix, dtype=float)
         geo_w_glob = 0.0
-        geo_enhancement = 1.0
+        geo_enh_det = 1.0
         z_std_ratio_binned = 1.0
     z_std_ratio_weighted = sys_res.attrs.get('z_std_ratio_pix_weighted', 1.0)
 
     if smooth:
-        print(f"Smoothing {dndzs.shape[0]} distributions...")
+        logger.info("Smoothing %d distributions...", dndzs.shape[0])
         sigma_dz = config.ANALYSIS_SETTINGS['smoothing_sigma_dz']
         sm_dndzs = smooth_nz_preserve_moments(z, dndzs, sigma_dz=sigma_dz)
         sm_dndz_det = smooth_nz_preserve_moments(z, dndz_det, sigma_dz=sigma_dz)
+        sm_dndz_det_flat = smooth_nz_preserve_moments(z, dndz_det_flat, sigma_dz=sigma_dz)
         
         # Recompute widths for smoothed distributions with the same min_count mask.
         if np.any(valid_pix):
             sm_dndzs_valid = sm_dndzs[valid_pix]
             frac_pix_valid = frac_pix[valid_pix]
-            sm_geo_w_pix_valid, sm_geo_w_glob, sm_geo_enhancement = utils.calculate_geometric_stats(
+            sm_geo_w_pix_valid, sm_geo_w_glob, sm_geo_enh_det = utils.calculate_geometric_stats(
                 z, sm_dndzs_valid, sm_dndz_det, frac_pix=frac_pix_valid
             )
             sm_z_std_ratio_binned = utils.calculate_binned_std_ratio(
@@ -853,11 +863,11 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
         else:
             sm_geo_w_pix = np.zeros_like(frac_pix, dtype=float)
             sm_geo_w_glob = 0.0
-            sm_geo_enhancement = 1.0
+            sm_geo_enh_det = 1.0
             sm_z_std_ratio_binned = 1.0
 
         return {
-            'z': z, 'dndzs': sm_dndzs, 'dndz_det': sm_dndz_det,
+            'z': z, 'dndzs': sm_dndzs, 'dndz_det': sm_dndz_det, 'dndz_det_flat': sm_dndz_det_flat,
             'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
             'z_std_ratio': z_std_ratio, 
             'z_std_ratio_weighted': z_std_ratio_weighted,
@@ -865,13 +875,13 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
             'z_std_ratio_binned_unsmoothed': z_std_ratio_binned,
             'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
             'geo_width_pix': sm_geo_w_pix, 'geo_width_global': sm_geo_w_glob, 
-            'geo_enhancement': sm_geo_enhancement,
-            'geo_enhancement_unsmoothed': geo_enhancement,
+            'geo_enh_det': sm_geo_enh_det,
+            'geo_enh_det_unsmoothed': geo_enh_det,
             'n_valid_pix': n_valid_pix, 'n_total_pix': n_total_pix,
         }
     else:
         return {
-            'z': z, 'dndzs': dndzs, 'dndz_det': dndz_det,
+            'z': z, 'dndzs': dndzs, 'dndz_det': dndz_det, 'dndz_det_flat': dndz_det_flat,
             'frac': frac, 'frac_pix': frac_pix, 'SEEN_idx': SEEN_idx,
             'z_std_ratio': z_std_ratio, 
             'z_std_ratio_weighted': z_std_ratio_weighted,
@@ -879,8 +889,8 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
             'z_std_ratio_binned_unsmoothed': z_std_ratio_binned,
             'std_z_pix': std_z_pix, 'std_z_global': std_z_global,
             'geo_width_pix': geo_w_pix, 'geo_width_global': geo_w_glob, 
-            'geo_enhancement': geo_enhancement,
-            'geo_enhancement_unsmoothed': geo_enhancement,
+            'geo_enh_det': geo_enh_det,
+            'geo_enh_det_unsmoothed': geo_enh_det,
             'n_valid_pix': n_valid_pix, 'n_total_pix': n_total_pix,
         }
 
@@ -894,6 +904,7 @@ def save_fits_output(stats, bin_idx=4):
         fits.ImageHDU(stats['z'], name='Z'),
         fits.ImageHDU(stats['dndzs'], name='DNDZS'),
         fits.ImageHDU(stats['dndz_det'], name='DNDZ_DET'),
+        fits.ImageHDU(stats.get('dndz_det_flat', stats['dndz_det']), name='DNDZ_DET_FLAT'),
         fits.ImageHDU([stats['frac']], name='FRAC'),
         fits.ImageHDU(stats['frac_pix'], name='FRAC_PIX'),
         fits.ImageHDU(stats['SEEN_idx'], name='SEEN_IDX'),
@@ -901,24 +912,32 @@ def save_fits_output(stats, bin_idx=4):
         fits.ImageHDU(stats['std_z_pix'], name='STD_Z_PIX'),
         fits.ImageHDU(stats.get('geo_width_pix', np.zeros_like(stats['std_z_pix'])), name='GEO_WIDTH_PIX'),
         fits.ImageHDU([stats.get('geo_width_global', 0.0)], name='GEO_WIDTH_GLOBAL'),
-        fits.ImageHDU([stats.get('geo_enhancement_unsmoothed', 1.0)], name='GEO_ENH_UNSM')
+        fits.ImageHDU([stats.get('geo_enh_det_unsmoothed', 1.0)], name='GEO_ENH_UNSM')
     ]
     fits.HDUList(hdus).writeto(output_fits_path, overwrite=True)
-    print(f"Results saved to {output_fits_path}")
+    logger.info("Results saved to %s", output_fits_path)
 
 
 def load_fits_output(bin_idx=4):
     """Load results from a multi-HDU FITS file."""
     output_fits_path = utils.get_output_path("nz_bin_fits", bin_idx=bin_idx)
     if not os.path.exists(output_fits_path):
-        print(f"Warning: FITS file {output_fits_path} not found.")
+        logger.warning("FITS file %s not found.", output_fits_path)
         return None
     
     with fits.open(output_fits_path) as hdul:
+        if 'DNDZ_DET_FLAT' in hdul:
+            dndz_det_flat = hdul['DNDZ_DET_FLAT'].data
+        else:
+            logger.warning("DNDZ_DET_FLAT not found in %s; falling back to DNDZ_DET. "
+                           "Re-run selection.py to generate it.", output_fits_path)
+            dndz_det_flat = hdul['DNDZ_DET'].data
+
         stats = {
             'z': hdul['Z'].data,
             'dndzs': hdul['DNDZS'].data,
             'dndz_det': hdul['DNDZ_DET'].data,
+            'dndz_det_flat': dndz_det_flat,
             'frac': hdul['FRAC'].data[0],
             'frac_pix': hdul['FRAC_PIX'].data,
             'SEEN_idx': hdul['SEEN_IDX'].data,
@@ -926,7 +945,7 @@ def load_fits_output(bin_idx=4):
             'std_z_pix': hdul['STD_Z_PIX'].data if 'STD_Z_PIX' in hdul else np.zeros_like(hdul['FRAC_PIX'].data),
             'geo_width_pix': hdul['GEO_WIDTH_PIX'].data if 'GEO_WIDTH_PIX' in hdul else np.zeros_like(hdul['FRAC_PIX'].data),
             'geo_width_global': hdul['GEO_WIDTH_GLOBAL'].data[0] if 'GEO_WIDTH_GLOBAL' in hdul else 0.0,
-            'geo_enhancement_unsmoothed': hdul['GEO_ENH_UNSM'].data[0] if 'GEO_ENH_UNSM' in hdul else 1.0
+            'geo_enh_det_unsmoothed': hdul['GEO_ENH_UNSM'].data[0] if 'GEO_ENH_UNSM' in hdul else 1.0
         }
     return stats
 
@@ -934,44 +953,48 @@ def load_fits_output(bin_idx=4):
 
 
 def main():
+    logging.basicConfig(level=getattr(logging, config.SIM_SETTINGS.get('log_level', 'INFO')),
+                        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+
     output_dir = "output"
     os.makedirs(output_dir, exist_ok=True)
 
     # Use fixed redshift bins from config.
     z, edges = utils.get_redshift_bins(None)
-    print(f"[Binning] Fixed Grid: z=[{edges[0]:.4f}, {edges[-1]:.4f}], dz={(edges[1]-edges[0]):.4f}, n_bins={len(z)}")
+    logger.info("[Binning] Fixed Grid: z=[%.4f, %.4f], dz=%.4f, n_bins=%d",
+                edges[0], edges[-1], edges[1]-edges[0], len(z))
 
     maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
 
     if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
-        print(f"Loading existing predictions from {OUTPUT_PREDS}...")
+        logger.info("Loading existing predictions from %s...", OUTPUT_PREDS)
         cla_cat = pd.read_feather(OUTPUT_PREDS)
         
-        print("Processing loaded catalog if needed (photo-z, cuts)...")
+        logger.info("Processing loaded catalog if needed (photo-z, cuts)...")
         cla_cat = process_classified_catalog(cla_cat)
         
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
     else:
         if not os.path.exists(OUTPUT_PREDS):
-             print(f"Predictions file {OUTPUT_PREDS} not found. Running simulation...")
+             logger.info("Predictions file %s not found. Running simulation...", OUTPUT_PREDS)
         gal_cat = load_and_filter_catalog()
         
         chunk_files, SEEN_idx, SEEN_idx_SIM = simulate_and_classify_chunked(gal_cat, z=z, edges=edges, output_dir=output_dir)
         
         # Consolidate detected galaxies (detected-only catalog is much smaller).
-        print(f"Re-assembling {len(chunk_files)} detected-only chunks...")
+        logger.info("Re-assembling %d detected-only chunks...", len(chunk_files))
         cla_cat = pd.concat([pd.read_feather(f) for f in chunk_files], ignore_index=True)
 
-        print(f"Saving raw detected catalog to {OUTPUT_PREDS}...")
+        logger.info("Saving raw detected catalog to %s...", OUTPUT_PREDS)
         os.makedirs(os.path.dirname(OUTPUT_PREDS), exist_ok=True)
         cla_cat.to_feather(OUTPUT_PREDS)
         
-        print("Final processing of consolidated catalog...")
+        logger.info("Final processing of consolidated catalog...")
         cla_cat = process_classified_catalog(cla_cat)
 
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
             
-        print(f"    Memory usage after re-assembly and processing: {get_memory_usage():.2f} GB")
+        logger.info("    Memory usage after re-assembly and processing: %.2f GB", get_memory_usage())
         
         # Clean up temporary chunks.
         for f in chunk_files:
@@ -982,7 +1005,7 @@ def main():
         except:
             pass
             
-        print(f"    Memory usage at end of simulation: {get_memory_usage():.2f} GB")
+        logger.info("    Memory usage at end of simulation: %.2f GB", get_memory_usage())
     
     # plt_nz.save_diagnostic_plots(results, output_dir)
     plt_nz.plot_tomographic_bins(results, output_dir)
@@ -1001,22 +1024,23 @@ def main():
         if f'tomo_{i}' in results:
             save_fits_output(results[f'tomo_{i}'], bin_idx=i)
 
-    print("\n--- Enhancement Factor Results ---")
-    print(f"(min_count={config.STATS_PARAMS.get('min_count', 0)}; "
-          f"fractions use ALL footprint pixels; enhancement factors use only valid pixels)")
-    print(f"{'Bin':<12} | {'Pix(v/t)':<12} | {'Frac':<8} | {'GeoEnh(Sm)':<10} | {'GeoEnh(Unsm)':<12} | {'zStd(Unw)':<10} | {'zStd(Wtd)':<10} | {'Binned(Sm)':<10} | {'Binned(Unsm)':<12}")
-    print("-" * 130)
+    logger.info("\n--- Enhancement Factor Results (nbar=det, smooth_nz=%s) ---", config.ANALYSIS_SETTINGS['smooth_nz'])
+    logger.info("(min_count=%d; fractions use ALL footprint pixels; enhancement factors use only valid pixels)",
+                config.STATS_PARAMS.get('min_count', 0))
+    logger.info("%-12s | %-12s | %-8s | %-10s | %-12s | %-10s | %-10s | %-10s | %-12s",
+                "Bin", "Pix(v/t)", "Frac", "GeoEnh(Sm)", "GeoEnh(Unsm)", "zStd(Unw)", "zStd(Wtd)", "Binned(Sm)", "Binned(Unsm)")
+    logger.info("-" * 130)
     for key, stats in results.items():
         pix_str = f"{stats.get('n_valid_pix', '?')}/{stats.get('n_total_pix', '?')}"
-        print(f"{key:<12} | "
-              f"{pix_str:<12} | "
-              f"{stats.get('frac', 0.0):.4f}   | "
-              f"{stats.get('geo_enhancement', 1.0):.4f}     | "
-              f"{stats.get('geo_enhancement_unsmoothed', 1.0):.4f}       | "
-              f"{stats.get('z_std_ratio', 1.0):.4f}     | "
-              f"{stats.get('z_std_ratio_weighted', 1.0):.4f}     | "
-              f"{stats.get('z_std_ratio_binned', 1.0):.4f}     | "
-              f"{stats.get('z_std_ratio_binned_unsmoothed', 1.0):.4f}")
+        logger.info("%-12s | %-12s | %.4f   | %.4f     | %.4f       | %.4f     | %.4f     | %.4f     | %.4f",
+                     key, pix_str,
+                     stats.get('frac', 0.0),
+                     stats.get('geo_enh_det', 1.0),
+                     stats.get('geo_enh_det_unsmoothed', 1.0),
+                     stats.get('z_std_ratio', 1.0),
+                     stats.get('z_std_ratio_weighted', 1.0),
+                     stats.get('z_std_ratio_binned', 1.0),
+                     stats.get('z_std_ratio_binned_unsmoothed', 1.0))
 
 
 if __name__ == "__main__":

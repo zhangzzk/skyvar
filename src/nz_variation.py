@@ -1,10 +1,13 @@
 import os
 import sys
+import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import pyccl as ccl
 from astropy.io import fits
+
+logger = logging.getLogger(__name__)
 
 try:
     from . import selection as sel
@@ -32,14 +35,20 @@ def save_clustering_results_to_fits(all_clustering_results, output_path):
         hdus.append(fits.ImageHDU(np.asarray(res.theta_deg, dtype=np.float64), name=f"{ext}_THETA"))
         hdus.append(fits.ImageHDU(np.asarray(res.w_model, dtype=np.float64), name=f"{ext}_WMODEL"))
         hdus.append(fits.ImageHDU(np.asarray(res.w_true, dtype=np.float64), name=f"{ext}_WTRUE"))
+        hdus.append(fits.ImageHDU(np.asarray(res.delta_w, dtype=np.float64), name=f"{ext}_DW_TOT"))
+        hdus.append(fits.ImageHDU(np.asarray(res.delta_w_1, dtype=np.float64), name=f"{ext}_DW_TERM1"))
+        hdus.append(fits.ImageHDU(np.asarray(res.delta_w_2, dtype=np.float64), name=f"{ext}_DW_TERM2"))
 
     fits.HDUList(hdus).writeto(output_path, overwrite=True)
-    print(f"Saved w_theta curves to {output_path}")
+    logger.info("Saved w_theta curves to %s", output_path)
 
 
 
 
 def main():
+    logging.basicConfig(level=getattr(logging, config.SIM_SETTINGS.get('log_level', 'INFO')),
+                        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+
     output_dir = 'output/'
     w_theta_path = utils.get_output_path("w_theta_fits")
     os.makedirs(output_dir, exist_ok=True)
@@ -48,7 +57,7 @@ def main():
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     results_stats = {}
     
-    print("Loading pre-calculated statistics from FITS files...")
+    logger.info("Loading pre-calculated statistics from FITS files...")
     # Load full sample (Using bin_idx=99 for full)
     full_stats = sel.load_fits_output(bin_idx=99)
     if full_stats is not None:
@@ -61,7 +70,7 @@ def main():
             results_stats[f'tomo_{i}'] = tomo_stats
 
     if not results_stats:
-        print("Error: No statistics could be loaded. Please run selection.py first.")
+        logger.error("No statistics could be loaded. Please run selection.py first.")
         return
 
     # 2. Setup Clustering Enhancement
@@ -88,20 +97,26 @@ def main():
     all_clustering_results = {}
     all_geo_factors = {}
 
-    print("\n--- Clustering Enhancement Results ---")
+    nbar_label = 'flat' if config.CLUSTERING_SETTINGS.get('flat_global', False) else 'det'
+    auto_label = 'auto' if config.CLUSTERING_SETTINGS.get('auto_only', False) else 'full'
+    logger.info("\n--- Clustering Enhancement Results (nbar=%s, corr=%s) ---", nbar_label, auto_label)
     for key, stats in results_stats.items():
-        print(f"Computing clustering for {key}...")
         
+        # Determine which reference n(z) to use
+        if config.CLUSTERING_SETTINGS.get('flat_global', False):
+            nbar = stats['dndz_det_flat']
+        else:
+            nbar = stats['dndz_det']
+            
         # Geometric Factor (for comparison)
-        geo_enhancement = utils.calculate_geometric_enhancement(
-            stats['z'], stats['dndzs'], stats['dndz_det'], frac_pix=None,
+        geo_enh = utils.calculate_geometric_enhancement(
+            stats['z'], stats['dndzs'], nbar, frac_pix=None,
         )
-        all_geo_factors[key] = geo_enhancement
+        all_geo_factors[key] = geo_enh
 
         # Clustering Result
         # n_maps expects (nz, npix) - stats['dndzs'] is (npix, nz)
         n_maps = stats['dndzs'].T 
-        nbar = stats['dndz_det'] 
         
         res = ce.compute_enhancement_from_maps(
             n_maps=n_maps,
@@ -110,16 +125,18 @@ def main():
             theta_deg=theta_deg,
             seen_idx=stats['SEEN_idx'],
             nside=config.SIM_SETTINGS['sys_nside_stats'],
-            weights=stats['frac_pix']
+            weights=stats['frac_pix'],
+            auto_only=config.CLUSTERING_SETTINGS.get('auto_only', False)
         )
         
         all_clustering_results[key] = res
         
         clustering_enh_factor = res.w_true[0] / res.w_model[0]
-        print(f"[{key:10s}] Geometric: {geo_enhancement:.6f}, Clustering (theta_min): {clustering_enh_factor:.6f}")
+        logger.info("[%10s] Geometric: %.6f, Clustering (theta_min): %.6f", key, geo_enh, clustering_enh_factor)
 
     # 3. Consolidated Plotting
     plt_nz.plot_all_comparisons(all_clustering_results, all_geo_factors, output_dir)
+    plt_nz.plot_all_delta_w_components(all_clustering_results, output_dir)
     plt_nz.plot_model_diagnostics(all_clustering_results, results_stats, output_dir)
     save_clustering_results_to_fits(all_clustering_results, w_theta_path)
 

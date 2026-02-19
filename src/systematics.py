@@ -7,6 +7,7 @@ Parts of the geometry utilities and tile logic are adapted from
 
 import os
 import sys
+import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import healpy as hp
@@ -23,6 +24,8 @@ except ImportError:
     import utils
     import config
     import plotting as plt_nz
+
+logger = logging.getLogger(__name__)
 
 # Core geometry helpers (adapted from generate_mocksys.py).
 
@@ -142,12 +145,6 @@ class SystematicBase:
 
     def _correlated_tile_draws(self, mean, sigma, l_corr):
         """Draw spatially-correlated tile values using an RBF covariance kernel.
-
-        Parameters
-        ----------
-        mean   : float – global mean value.
-        sigma  : float – std of the correlated component.
-        l_corr : float – correlation length [deg].
         """
         centers = self.tiles.tile_centers                     # (N, 2)
         cos_dec = np.cos(np.radians(
@@ -247,7 +244,7 @@ def main():
     DEC_MIN, DEC_MAX = config.SYSTEMATICS_CONFIG['footprint']['dec_range']
     
     # Initialize tile grid.
-    print("Initializing tiles...")
+    logger.info("Initializing tiles...")
     dx = config.SYSTEMATICS_CONFIG['tiles']['size_deg']
     test_tiles, (ra_min_n, ra_max_n, dec_lo_n, dec_hi_n) = build_tiles_from_footprint(
         (RA_MIN, RA_MAX), (DEC_MIN, DEC_MAX), dx
@@ -263,7 +260,7 @@ def main():
     sys_psf = SeeingSystematic(test_tiles, config.SYSTEMATICS_CONFIG['psf'])
     sys_galactic = GalacticSystematic()
 
-    print("Evaluating systematics...")
+    logger.info("Evaluating systematics...")
     pix_sys_noise = sys_noise(ra_pix, dec_pix, pix_tileind)
     pix_sys_psf = sys_psf(ra_pix, dec_pix, pix_tileind)
     pix_sys_galactic = sys_galactic(ra_pix, dec_pix)
@@ -271,11 +268,11 @@ def main():
 
     output_path = utils.get_output_path("mock_sys_map")
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    print(f"Saving maps to {output_path}...")
+    logger.info("Saving maps to %s...", output_path)
     hp.write_map(output_path, [pix_sys_psf, pix_sys_noise, pix_sys_galactic], overwrite=True, dtype=np.float32)
 
     # Combined plotting (maps + histograms).
-    print("Generating consolidated overview plots...")
+    logger.info("Generating consolidated overview plots...")
     plt_nz.plot_systematics_overview(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
         ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
@@ -286,4 +283,6 @@ def main():
     )
 
 if __name__ == "__main__":
+    logging.basicConfig(level=getattr(logging, config.SIM_SETTINGS.get('log_level', 'INFO')),
+                        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     main()

@@ -12,6 +12,7 @@ SIM_SETTINGS = {
     'chunk_size': 250_000_000,
     'n_jobs': -1,  # Parallel workers (-1 uses all available).
     'detection_threshold': 0.2, # Detection-probability threshold.
+    'log_level': 'INFO',       # Logging level: DEBUG, INFO, WARNING, ERROR.
 }
 
 # External library paths.
@@ -130,6 +131,8 @@ CLUSTERING_SETTINGS = {
     'theta_min_deg': 0.01,
     'theta_max_deg': 10.0,
     'theta_bins': 30,
+    'auto_only': True,
+    'flat_global': True,
 }
 
 # ==============================================================================
