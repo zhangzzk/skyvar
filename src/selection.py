@@ -323,10 +323,19 @@ def smooth_nz_preserve_moments(
 
 
 def load_and_filter_catalog():
-    """Load the input catalog and apply baseline quality cuts."""
+    """Load the input catalog and apply baseline quality cuts.
+    
+    Sets the module-level POP_ARCMIN2_FILTERED from the catalog footprint.
+    """
     logger.info("Loading catalog from %s...", GAL_CAT_PATH)
     gal_cat = at.rec2pd(at.load_hdf(GAL_CAT_PATH))
-    gal_cat = gal_cat[['sersic_n', 'int_mag', 'int_r50_arcsec', 'z', 'e1', 'e2']].rename(columns={
+    
+    # Keep ra/dec temporarily for density calculation.
+    keep_cols = ['sersic_n', 'int_mag', 'int_r50_arcsec', 'z', 'e1', 'e2']
+    has_coords = ('ra' in gal_cat.columns) and ('dec' in gal_cat.columns)
+    if has_coords:
+        keep_cols += ['ra', 'dec']
+    gal_cat = gal_cat[keep_cols].rename(columns={
         'int_mag': 'r',
         'int_r50_arcsec': 'Re',
         'z': 'redshift',
@@ -344,6 +353,28 @@ def load_and_filter_catalog():
         (gal_cat['Re'] < cs['re_max']) & (gal_cat['Re'] > cs['re_min']) &
         (gal_cat['sersic_n'] < cs['sersic_max']) & (gal_cat['sersic_n'] > cs['sersic_min'])
     ].reset_index(drop=True)
+
+    # Compute density from the catalog footprint after quality cuts.
+    global POP_ARCMIN2_FILTERED
+    cfg_density = config.CATALOG_SETTINGS.get('n_arcmin2', None)
+    if cfg_density is not None:
+        POP_ARCMIN2_FILTERED = cfg_density
+        logger.info("Catalog density (config): %.1f gal/arcmin2", POP_ARCMIN2_FILTERED)
+        if has_coords:
+            gal_cat = gal_cat.drop(columns=['ra', 'dec'])
+    elif has_coords:
+        nside_density = 512
+        pix_ids = hp.ang2pix(nside_density, gal_cat['ra'].values, gal_cat['dec'].values, lonlat=True)
+        n_occupied = len(np.unique(pix_ids))
+        pix_area_arcmin2 = hp.nside2pixarea(nside_density, degrees=True) * 3600.0
+        area_arcmin2 = n_occupied * pix_area_arcmin2
+        POP_ARCMIN2_FILTERED = len(gal_cat) / area_arcmin2
+        logger.info("Catalog density (auto): %d galaxies / %.1f arcmin2 = %.1f gal/arcmin2",
+                     len(gal_cat), area_arcmin2, POP_ARCMIN2_FILTERED)
+        gal_cat = gal_cat.drop(columns=['ra', 'dec'])
+    else:
+        POP_ARCMIN2_FILTERED = 200.0
+        logger.warning("No ra/dec and no config n_arcmin2; using default: %.1f gal/arcmin2", POP_ARCMIN2_FILTERED)
 
     # Keep only fields used downstream.
     gal_cat = gal_cat[['sersic_n', 'r', 'Re', 'redshift', 'BA', 'angle']]
@@ -401,20 +432,8 @@ def process_one(
     randi = rng_local.integers(0, icat.shape[0], size=gal_num)
     subset = icat.iloc[randi].copy()
 
-    # RA/DEC are required by nz_utils.icat2cla_v2 for neighbor features.
-    ra_c, dec_c = hp.pix2ang(nside_sim, idx_sim, lonlat=True)
-    pix_size_deg = np.sqrt(4 * np.pi * (180 / np.pi) ** 2 / hp.nside2npix(nside_sim))
-    rng_jitter = np.random.default_rng(i + 12345)
-    subset['RA'] = (
-        ra_c + rng_jitter.uniform(-0.5 * pix_size_deg, 0.5 * pix_size_deg, size=gal_num)
-    ) % 360.0
-    subset['DEC'] = np.clip(
-        dec_c + rng_jitter.uniform(-0.5 * pix_size_deg, 0.5 * pix_size_deg, size=gal_num),
-        -90.0,
-        90.0,
-    )
-
     # Keep simulation-grid pixel IDs; remap later for stats.
+    # RA/DEC are assigned at chunk level to ensure realistic density.
     subset['pix_idx'] = np.int64(idx_sim)
 
     conds = conditions.copy()
@@ -427,15 +446,6 @@ def process_one(
 
     for key, value in conds.items():
         subset[key] = value
-
-    subset['snr_input_p'] = galaxy_snr_from_mag_size(
-        subset['r'],
-        subset['Re'],
-        subset['psf_fwhm'],
-        subset['pixel_rms'],
-        zeropoint=subset['zero_point'],
-        pixscale=subset['pixel_size'],
-    )
 
     subset = downcast_float64_to32(subset)
     return subset
@@ -509,13 +519,11 @@ def process_classified_catalog(df, rng=None):
     Currently this includes photo-z assignment and MagLim selection.
     """
 
-    # Keep this idempotent for already-processed catalogs.
-    if 'z_pho_input_p' not in df.columns:
-        # Compute observed magnitude and photo-z from input properties.
-        df = compute_obs_stats(df, rng=rng)
+    # Compute observed magnitude and photo-z from input properties.
+    df = compute_obs_stats(df, rng=rng)
 
-        # Apply MagLim selection.
-        df = apply_maglim_selection(df, rng=rng)
+    # Apply MagLim selection.
+    df = apply_maglim_selection(df, rng=rng)
 
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     bin_mask = get_binning_weights(df, tomo_bin_edges)
@@ -616,7 +624,14 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
         global_hist_in += h_in
         global_num_in += len(block_fullset)
         
-        # 2) Coordinates are handled in process_one.
+        # 2) Assign RA/DEC after concat to preserve the original number density.
+        n_degree2 = POP_ARCMIN2_FILTERED * 3600.0
+        tot_num = block_fullset.shape[0]
+        area = tot_num / n_degree2
+        side = np.sqrt(area)
+        block_fullset["RA"] = np.random.uniform(0, side, size=tot_num)
+        block_fullset["DEC"] = np.random.uniform(0, side, size=tot_num)
+        logger.info("Randomized chunk coords: tot_num=%d, n_degree2=%.0f, area=%.2f deg2, side=%.2f deg", tot_num, n_degree2, area, side)
 
         # 3) Classify and filter.
         try:

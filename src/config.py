@@ -6,9 +6,9 @@ import numpy as np
 # ==============================================================================
 # Compute resources and HEALPix resolution.
 SIM_SETTINGS = {
-    'sys_nside_sim': 1024,     # High-res nside for simulated maps.
-    'sys_nside_stats': 256,   # Nside used when grouping pixel-level statistics.
-    'n_pop_sample': 60_000,  # Number of simulated galaxies per sim pixel.
+    'sys_nside_sim': 32,     # High-res nside for simulated maps.
+    'sys_nside_stats': 32,   # Nside used when grouping pixel-level statistics.
+    'n_pop_sample': 100_000,  # Number of simulated galaxies per sim pixel.
     'chunk_size': 250_000_000,
     'n_jobs': -1,  # Parallel workers (-1 uses all available).
     'detection_threshold': 0.2, # Detection-probability threshold.
@@ -34,7 +34,7 @@ PATHS = {
 # 2. SYSTEMATICS CONFIGURATION (systematics.py)
 # ==============================================================================
 # Parameters used to generate mock systematics maps.
-TILE_SIZE = 1.0
+TILE_SIZE = 2.0
 SYSTEMATICS_CONFIG = {
     'footprint': {
         'ra_range': [170, 220],
@@ -73,6 +73,7 @@ CATALOG_SETTINGS = {
     'ba_max': 1.0,
     'sersic_min': 0.5,
     'sersic_max': 6.0,
+    'n_arcmin2': None,
 }
 
 # Nominal observation conditions (baseline values).
@@ -94,7 +95,7 @@ PHOTOZ_PARAMS = {
     'rms_ref': 6.0,       # Reference noise level.
     'psf_fwhm_ref': 0.7,   # Reference PSF seeing.
     'maglim0': 4,          # MagLim slope.
-    'maglim1': 19,         # MagLim intercept.
+    'maglim1': 18.7,         # MagLim intercept.
     'maglim2': 17,         # Bright-end MagLim cut.
     'snr_min': 0,          # Minimum SNR for lens selection.
 }
