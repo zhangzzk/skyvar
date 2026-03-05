@@ -262,6 +262,49 @@ def plot_model_diagnostics(all_results, all_stats, output_dir):
     plt.savefig(save_path)
     plt.close()
 
+
+def plot_density_variation_wtheta(result, save_path):
+    """Plot theta*w(theta) for no-selection / uniform-random / organized-random."""
+    plt.figure(figsize=(8, 6))
+
+    # Theory curve (smooth line behind data points).
+    if result.theta_theory is not None and result.w_theory is not None:
+        plt.plot(
+            result.theta_theory,
+            result.theta_theory * result.w_theory,
+            "-", color="grey", lw=1.5, alpha=0.8, label="theory",
+        )
+
+    plt.errorbar(
+        result.theta_orig,
+        result.theta_orig * result.w_orig,
+        yerr=result.theta_orig * np.sqrt(np.maximum(np.diag(result.cov_orig), 0.0)),
+        fmt=".",
+        label="no selection",
+    )
+    plt.errorbar(
+        result.theta_ur,
+        result.theta_ur * result.w_ur,
+        yerr=result.theta_ur * np.sqrt(np.maximum(np.diag(result.cov_ur), 0.0)),
+        fmt=".",
+        label="uniform random",
+    )
+    plt.errorbar(
+        result.theta_or,
+        result.theta_or * result.w_or,
+        yerr=result.theta_or * np.sqrt(np.maximum(np.diag(result.cov_or), 0.0)),
+        fmt=".",
+        label="organized random",
+    )
+    plt.xscale("log")
+    plt.xlabel(r"$\theta$ [arcmin]")
+    plt.ylabel(r"$\theta \cdot w(\theta)$")
+    plt.title("Angular Correlation: Density Variation")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
 def plot_all_comparisons(all_results, geometric_factors, output_dir):
     """
     Plot w_model vs w_true and their fractional difference for all bins in a multi-panel figure.

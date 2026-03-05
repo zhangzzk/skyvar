@@ -516,25 +516,53 @@ def apply_maglim_selection(subset, rng=None):
     subset = subset[lens_keep].reset_index(drop=True)
     return subset
 
+def apply_galaxy_selection(df, mode=None):
+    """Unified galaxy selection: detection threshold + optional SNR/MagLim cut.
+
+    Parameters
+    ----------
+    df : DataFrame
+        Must contain 'detection' column.
+    mode : str or None
+        'snr'    – additionally keep galaxies with snr_input_p > snr_min.
+        'maglim' – compute observed properties, then apply MagLim cut.
+        None     – detection threshold only.
+    """
+
+    df = compute_obs_stats(df)
+    # 1. Detection threshold.
+    det_threshold = float(config.SIM_SETTINGS.get('detection_threshold', 0.0))
+    det_vals = pd.to_numeric(df['detection'], errors='coerce').fillna(0.0).to_numpy()
+    n0 = len(df)
+    df = df.loc[det_vals > det_threshold].copy()
+    logger.info("Detection threshold %.3g: kept %d / %d", det_threshold, len(df), n0)
+
+    if mode is None:
+        return df
+
+    # 2. SNR cut.
+    if mode == 'snr':
+        snr_min = float(config.PHOTOZ_PARAMS.get('snr_min', 0.0))
+        if snr_min > 0.0 and 'snr_input_p' in df.columns:
+            snr = pd.to_numeric(df['snr_input_p'], errors='coerce').fillna(0.0).to_numpy()
+            n1 = len(df)
+            df = df.loc[snr > snr_min].copy()
+            logger.info("SNR cut > %.3g: kept %d / %d", snr_min, len(df), n1)
+        return df
+
+    # 3. MagLim cut.
+    if mode == 'maglim':
+        n1 = len(df)
+        df = apply_maglim_selection(df)
+        logger.info("MagLim cut: kept %d / %d", len(df), n1)
+        return df
+
+    raise ValueError(f"Unknown selection mode='{mode}'. Use 'snr', 'maglim', or None.")
+
+
 def process_classified_catalog(df, rng=None):
-    """
-    Apply post-classification processing before summary statistics.
-    Currently this includes photo-z assignment and MagLim selection.
-    """
-    mode = str(config.ANALYSIS_SETTINGS.get('post_detection_mode', 'standard')).strip().lower()
-    if mode not in {'standard', 'skip_cuts'}:
-        raise ValueError(f"ANALYSIS_SETTINGS.post_detection_mode must be 'standard' or 'skip_cuts', got '{mode}'")
-
-    # Compute observed magnitude and photo-z from input properties.
-    df = compute_obs_stats(df, rng=rng)
-
-    if mode == 'standard':
-        # Apply MagLim selection.
-        df = apply_maglim_selection(df, rng=rng)
-        # Optional extra post-detection cuts.
-        df = apply_post_detection_cuts(df)
-    else:
-        logger.info("post_detection_mode=skip_cuts: skipping MagLim and extra post-detection cuts.")
+    """Post-selection processing: compute obs properties and assign tomo bins."""
+    # Compute observed magnitude and photo-z (if not already done by apply_galaxy_selection).
 
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     bin_mask = get_binning_weights(df, tomo_bin_edges)
@@ -551,13 +579,6 @@ def process_classified_catalog(df, rng=None):
     df = downcast_float64_to32(df)
     
     return df
-
-
-def apply_detection_threshold(df, threshold=DETECTION_THRESHOLD):
-    """Apply detection threshold at analysis time (not at cache-write time)."""
-    det_vals = pd.to_numeric(df['detection'], errors='coerce').fillna(0.0).to_numpy()
-    keep = det_vals > float(threshold)
-    return df.loc[keep].copy()
 
 
 def get_binning_weights(df, bin_edges):
@@ -999,17 +1020,13 @@ def main():
 
     maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
 
+    # Selection mode from config — passed directly to apply_galaxy_selection.
+    sel_mode = config.ANALYSIS_SETTINGS.get('selection_mode', None)
+
     if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
         logger.info("Loading existing predictions from %s...", OUTPUT_PREDS)
         cla_cat = pd.read_feather(OUTPUT_PREDS)
-        n_before = len(cla_cat)
-        cla_cat = apply_detection_threshold(cla_cat, DETECTION_THRESHOLD)
-        logger.info(
-            "Applied detection threshold after loading: kept %s / %s rows (threshold=%.3g)",
-            f"{len(cla_cat):,}", f"{n_before:,}", DETECTION_THRESHOLD
-        )
-        
-        logger.info("Processing loaded catalog if needed (photo-z, cuts)...")
+        cla_cat = apply_galaxy_selection(cla_cat, mode=sel_mode)
         cla_cat = process_classified_catalog(cla_cat)
         
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
@@ -1028,14 +1045,7 @@ def main():
         os.makedirs(os.path.dirname(OUTPUT_PREDS), exist_ok=True)
         cla_cat.to_feather(OUTPUT_PREDS)
 
-        n_before = len(cla_cat)
-        cla_cat = apply_detection_threshold(cla_cat, DETECTION_THRESHOLD)
-        logger.info(
-            "Applied detection threshold after loading/build: kept %s / %s rows (threshold=%.3g)",
-            f"{len(cla_cat):,}", f"{n_before:,}", DETECTION_THRESHOLD
-        )
-        
-        logger.info("Final processing of consolidated catalog...")
+        cla_cat = apply_galaxy_selection(cla_cat, mode=sel_mode)
         cla_cat = process_classified_catalog(cla_cat)
 
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
