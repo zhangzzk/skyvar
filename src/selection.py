@@ -28,13 +28,6 @@ def apply_post_detection_cuts(df):
     if df is None or df.empty:
         return df
         
-    snr_thresh = config.ANALYSIS_SETTINGS.get('post_det_snr_thresh', 0.0)
-    if snr_thresh > 0:
-        # Support both legacy and current column names.
-        snr_col = 'snr_input_p' if 'snr_input_p' in df.columns else 'snr'
-        if snr_col in df.columns:
-            df = df[df[snr_col] > snr_thresh]
-            
     # Add extra post-detection cuts here if needed.
     
     return df
@@ -447,6 +440,17 @@ def process_one(
     for key, value in conds.items():
         subset[key] = value
 
+    # Precompute SNR on the raw simulated catalog so icat2cla_v2 carries it
+    # into both snr_input_p and snr_input_s.
+    subset['snr'] = galaxy_snr_from_mag_size(
+        subset['r'],
+        subset['Re'],
+        subset['psf_fwhm'],
+        subset['pixel_rms'],
+        zeropoint=subset['zero_point'],
+        pixscale=subset['pixel_size'],
+    )
+
     subset = downcast_float64_to32(subset)
     return subset
 
@@ -506,9 +510,8 @@ def apply_maglim_selection(subset, rng=None):
     
     faint_cut = subset['r_obs_input_p'] < (PHOTOZ_PARAMS['maglim0'] * subset['z_pho_input_p'] + PHOTOZ_PARAMS['maglim1'])
     bright_cut = subset['r_obs_input_p'] > PHOTOZ_PARAMS['maglim2']
-    snr_cut = subset['snr_input_p'] > PHOTOZ_PARAMS['snr_min']
 
-    lens_keep = faint_cut & bright_cut & snr_cut
+    lens_keep = faint_cut & bright_cut
     # lens_keep &= (subset['redshift_input_p'] < config.ANALYSIS_SETTINGS['z_max']) # save memory
     subset = subset[lens_keep].reset_index(drop=True)
     return subset
@@ -518,12 +521,20 @@ def process_classified_catalog(df, rng=None):
     Apply post-classification processing before summary statistics.
     Currently this includes photo-z assignment and MagLim selection.
     """
+    mode = str(config.ANALYSIS_SETTINGS.get('post_detection_mode', 'standard')).strip().lower()
+    if mode not in {'standard', 'skip_cuts'}:
+        raise ValueError(f"ANALYSIS_SETTINGS.post_detection_mode must be 'standard' or 'skip_cuts', got '{mode}'")
 
     # Compute observed magnitude and photo-z from input properties.
     df = compute_obs_stats(df, rng=rng)
 
-    # Apply MagLim selection.
-    df = apply_maglim_selection(df, rng=rng)
+    if mode == 'standard':
+        # Apply MagLim selection.
+        df = apply_maglim_selection(df, rng=rng)
+        # Optional extra post-detection cuts.
+        df = apply_post_detection_cuts(df)
+    else:
+        logger.info("post_detection_mode=skip_cuts: skipping MagLim and extra post-detection cuts.")
 
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     bin_mask = get_binning_weights(df, tomo_bin_edges)
@@ -540,6 +551,14 @@ def process_classified_catalog(df, rng=None):
     df = downcast_float64_to32(df)
     
     return df
+
+
+def apply_detection_threshold(df, threshold=DETECTION_THRESHOLD):
+    """Apply detection threshold at analysis time (not at cache-write time)."""
+    det_vals = pd.to_numeric(df['detection'], errors='coerce').fillna(0.0).to_numpy()
+    keep = det_vals > float(threshold)
+    return df.loc[keep].copy()
+
 
 def get_binning_weights(df, bin_edges):
     """
@@ -657,16 +676,12 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
             # Important: dropping too many columns can break later steps.
             keep_cols = [
                 'pix_idx_input_p', 'redshift_input_p', 'detection',
+                'snr_input_p',
                 'r_input_p', 'Re_input_p',
                 'psf_fwhm_input_p', 'pixel_rms_input_p', 'zero_point_input_p',
                 'pixel_size_input_p'
             ]
             block_cla = block_cla[[c for c in keep_cols if c in block_cla.columns]].copy()
-
-            # Keep detections only to save memory.
-            # Coerce to numeric for robustness against unexpected dtypes.
-            det_vals = pd.to_numeric(block_cla['detection'], errors='coerce').fillna(0.0).to_numpy()
-            block_cla = block_cla.loc[det_vals > DETECTION_THRESHOLD].copy()
 
             block_cla = downcast_float64_to32(block_cla)
             if 'pix_idx_input_p' in block_cla.columns:
@@ -718,10 +733,11 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
     )
 
     # Detection map (full sample, before tomo binning).
+    # Notebook-consistent definition:
+    #   frac_pix = sum(detection) / n_input_pix
     n_det_pix_full = np.bincount(cla_cat['pix_idx_stats'], weights=cla_cat['detection'], minlength=NPIX)
-    frac_det, frac_det_pix = compute_detection_fractions(
-        n_det_pix_full[SEEN_idx], n_input_pix[SEEN_idx]
-    )
+    frac_det, frac_det_pix_full = compute_detection_fractions(n_det_pix_full, n_input_pix)
+    frac_det_pix = frac_det_pix_full[SEEN_idx]
 
     mean_p = np.full(NPIX, hp.UNSEEN)
     mean_p[SEEN_idx] = frac_det_pix
@@ -753,6 +769,9 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
         smooth=config.ANALYSIS_SETTINGS['smooth_nz'],
         n_input_pix=n_input_pix[SEEN_idx],
     )
+    # Keep full-sample fractions consistent with direct detection map definition.
+    results['full']['frac'] = frac_det
+    results['full']['frac_pix'] = frac_det_pix
     
     # Tomographic bins.
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
@@ -811,8 +830,7 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
     
     dndzs_raw = dndzs_raw.to_numpy().astype(float)
     # Ensure consistent trapezoidal normalization across all pixels
-    norms = np.trapezoid(dndzs_raw, z, axis=1)
-    dndzs = np.divide(dndzs_raw, norms[:, None], out=np.zeros_like(dndzs_raw), where=norms[:, None] > 0)
+    dndzs = utils.normalize_profile(z, dndzs_raw, axis=1)
 
     sum_num = sys_res["sum_num"].drop(["total_detected"]).to_numpy(dtype=float)
     if n_input_pix is None:
@@ -821,12 +839,12 @@ def process_stats(sys_res, z, SEEN_idx, smooth=False, n_input_pix=None):
     std_z_pix = sys_res["std_z_pix"].drop(["total_detected"]).values
     
     dndz_det_raw = sys_res.drop(["sum_num", "std_z_pix"], axis=1).loc["total_detected"].to_numpy().astype(float)
-    dndz_det = dndz_det_raw / np.trapezoid(dndz_det_raw, z)
+    dndz_det = utils.normalize_profile(z, dndz_det_raw)
     
     # dndz_det_flat: Each galaxy is weighted by inverse frac_pix to remove selection-induced density variations.
     # This simplifies to an area-weighted (n_input_pix) average of per-pixel normalized shapes.
     dndz_det_flat_raw = np.sum(dndzs * n_input_pix[:, None], axis=0)
-    dndz_det_flat = dndz_det_flat_raw / np.trapezoid(dndz_det_flat_raw, z)
+    dndz_det_flat = utils.normalize_profile(z, dndz_det_flat_raw)
 
     std_z_global = sys_res.loc["total_detected", "std_z_pix"]
 
@@ -984,6 +1002,12 @@ def main():
     if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
         logger.info("Loading existing predictions from %s...", OUTPUT_PREDS)
         cla_cat = pd.read_feather(OUTPUT_PREDS)
+        n_before = len(cla_cat)
+        cla_cat = apply_detection_threshold(cla_cat, DETECTION_THRESHOLD)
+        logger.info(
+            "Applied detection threshold after loading: kept %s / %s rows (threshold=%.3g)",
+            f"{len(cla_cat):,}", f"{n_before:,}", DETECTION_THRESHOLD
+        )
         
         logger.info("Processing loaded catalog if needed (photo-z, cuts)...")
         cla_cat = process_classified_catalog(cla_cat)
@@ -996,13 +1020,20 @@ def main():
         
         chunk_files, SEEN_idx, SEEN_idx_SIM = simulate_and_classify_chunked(gal_cat, z=z, edges=edges, output_dir=output_dir)
         
-        # Consolidate detected galaxies (detected-only catalog is much smaller).
-        logger.info("Re-assembling %d detected-only chunks...", len(chunk_files))
+        # Consolidate all predicted primaries before applying detection threshold.
+        logger.info("Re-assembling %d prediction chunks...", len(chunk_files))
         cla_cat = pd.concat([pd.read_feather(f) for f in chunk_files], ignore_index=True)
 
-        logger.info("Saving raw detected catalog to %s...", OUTPUT_PREDS)
+        logger.info("Saving raw full prediction catalog to %s...", OUTPUT_PREDS)
         os.makedirs(os.path.dirname(OUTPUT_PREDS), exist_ok=True)
         cla_cat.to_feather(OUTPUT_PREDS)
+
+        n_before = len(cla_cat)
+        cla_cat = apply_detection_threshold(cla_cat, DETECTION_THRESHOLD)
+        logger.info(
+            "Applied detection threshold after loading/build: kept %s / %s rows (threshold=%.3g)",
+            f"{len(cla_cat):,}", f"{n_before:,}", DETECTION_THRESHOLD
+        )
         
         logger.info("Final processing of consolidated catalog...")
         cla_cat = process_classified_catalog(cla_cat)

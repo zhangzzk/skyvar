@@ -129,8 +129,25 @@ class Tiles:
             tile_inds[mask] = i
 
         return tile_inds
-# Systematic-map model classes.
 
+    def get_tileind_regular(self, lon, lat):
+        lon = (np.asarray(lon) + 360) % 360
+        lat = np.asarray(lat)
+
+        nlon = len(np.unique(self.tile_centers[:, 0]))
+        nlat = len(np.unique(self.tile_centers[:, 1]))
+
+        lon0 = (self.tile_centers[:, 0].min() - self.dlons[0] / 2 + 360) % 360
+        lat0 = self.tile_centers[:, 1].min() - self.dlats[0] / 2
+
+        ilon = np.floor(((lon - lon0 + 360) % 360) / self.dlons[0]).astype(int)
+        ilat = np.floor((lat - lat0) / self.dlats[0]).astype(int)
+
+        valid = (ilat >= 0) & (ilat < nlat) & (ilon >= 0) & (ilon < nlon)
+        tile_inds = np.where(valid, ilat * nlon + ilon, -1)
+        return tile_inds
+
+# Systematic-map model classes.
 class SystematicBase:
     """Base class for tile-based systematic models."""
     def __init__(self, tiles_obj, config_dict):
@@ -250,7 +267,7 @@ def main():
         (RA_MIN, RA_MAX), (DEC_MIN, DEC_MAX), dx
     )
     
-    pix_tileind = test_tiles.get_tileind_fast(ra_pix, dec_pix)
+    pix_tileind = test_tiles.get_tileind_regular(ra_pix, dec_pix)
     exact_footprint = in_ra_range(ra_pix, ra_min_n, ra_max_n) & (dec_pix >= dec_lo_n) & (dec_pix <= dec_hi_n)
     pix_tileind[~exact_footprint] = -1
     mask_footprint = pix_tileind != -1

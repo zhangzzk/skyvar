@@ -6,12 +6,12 @@ import numpy as np
 # ==============================================================================
 # Compute resources and HEALPix resolution.
 SIM_SETTINGS = {
-    'sys_nside_sim': 32,     # High-res nside for simulated maps.
-    'sys_nside_stats': 32,   # Nside used when grouping pixel-level statistics.
-    'n_pop_sample': 100_000,  # Number of simulated galaxies per sim pixel.
+    'sys_nside_sim': 128,     # High-res nside for simulated maps.
+    'sys_nside_stats': 128,   # Nside used when grouping pixel-level statistics.
+    'n_pop_sample': 10_000,  # Number of simulated galaxies per sim pixel.
     'chunk_size': 250_000_000,
     'n_jobs': -1,  # Parallel workers (-1 uses all available).
-    'detection_threshold': 0.2, # Detection-probability threshold.
+    'detection_threshold': 0, # Detection-probability threshold.
     'log_level': 'INFO',       # Logging level: DEBUG, INFO, WARNING, ERROR.
 }
 
@@ -34,21 +34,21 @@ PATHS = {
 # 2. SYSTEMATICS CONFIGURATION (systematics.py)
 # ==============================================================================
 # Parameters used to generate mock systematics maps.
-TILE_SIZE = 2.0
+TILE_SIZE = 1.0
 SYSTEMATICS_CONFIG = {
     'footprint': {
-        'ra_range': [170, 220],
-        'dec_range': [-10, 10],
+        'ra_range': [155, 233],
+        'dec_range': [-9, 9],
     },
     'tiles': {
         'size_deg': TILE_SIZE,
     },
     'noise': {
         'mu0': 6.0,            # Global mean pixel noise.
-        'sigma_corr': 0.5,     # Correlated large-scale scatter.  
+        'sigma_corr': 0.3,     # Correlated large-scale scatter.  
         'l_corr': 6.0,        # Correlation length [deg].        
         'sigma_uncorr': 0.6,   # Uncorrelated tile-to-tile scatter.  
-        'sigma_pix': 0.02,      # Small pixel-level jitter.
+        'sigma_pix': 0.1,      # Small pixel-level jitter.
     },
     'psf': {
         'mu0': 0.7,            # Global baseline (median seeing).
@@ -56,7 +56,7 @@ SYSTEMATICS_CONFIG = {
         'l_corr': 6.0,        # Correlation length [deg].        
         'sigma_uncorr': 0.08,  # Uncorrelated tile-to-tile scatter.  
         'intra_scale': TILE_SIZE,    # Intra-tile Gaussian bump scale [deg].  
-        'sigma_pix': 0.02,     # Small pixel-level noise.
+        'sigma_pix': 0.01,     # Small pixel-level noise.
     },
 }
 
@@ -93,6 +93,7 @@ PHOTOZ_PARAMS = {
     'alpha': 0.4,          # Magnitude-scaling power.
     'm_ref': 21,           # Reference magnitude.
     'rms_ref': 6.0,       # Reference noise level.
+    'pixel_rms_ref': 6.0, # Alias for plotting.py
     'psf_fwhm_ref': 0.7,   # Reference PSF seeing.
     'maglim0': 4,          # MagLim slope.
     'maglim1': 18.7,         # MagLim intercept.
@@ -109,6 +110,7 @@ ANALYSIS_SETTINGS = {
     'smoothing_sigma_dz': 0.05,
     'smooth_nz': False,      # Smooth n(z) distributions.
     'load_preds': False,    # Load cached predictions instead of re-simulating.
+    'post_detection_mode': 'skip_cuts', # 'standard' or 'skip_cuts'
 }
 
 STATS_PARAMS = {
@@ -143,42 +145,33 @@ CLUSTERING_SETTINGS = {
 DENSITY_SETTINGS = {
     'external': {
         'tiaogeng_path': '/home/z/Zekang.Zhang/tiaogeng',
-        'gls_filename': 'gls.txt',
+        'gls_filename': 'mock_gls.npy',
     },
     'mock': {
+        'nz_source': 'toy',
+        'gaussian_mean': 0.6,
+        'gaussian_sigma': 0.23,
+        'glass_nside': 1024,
+        'n_arcmin2': 10.0,
         'bias': 1.0,
-        'glass_nside': 256,
-        'n_arcmin2': 30.0,
-        'z_min': 0.0,
-        'z_max': 2.0,
-        'z_samples': 200,
-        'dndz_mean': 0.7,
-        'dndz_sigma': 0.3,
-        'shell_dz': 0.1,
-        'window_dz': 0.1,
-        'footprint': {
-            'dx': 1.0,
-            'dy': 1.0,
-            'nlon': 100,
-            'nlat': 10,
-            'start_lon': 140.0,
-            'start_lat': -5.0,
-        },
+        'normalize_detection_by_max': True,
+        'selection_mode': 'snr',  # 'snr' or 'maglim'
+        'snr_min': 0.0,
     },
     'treecorr': {
-        'n_patches': 50,
-        'n_threads': -1,
         'gal_nside': 1024,
-        'nbins': 15,
-        'min_sep_arcmin': 1.0,
-        'max_sep_arcmin': 300.0,
-        'var_method': 'jackknife',
-    },
-    'theory': {
-        'ell_max': 3000,
-        'ell_samples': 3001,
+        'n_patches': 30,
+        'n_threads': 20,
+        'nbins': 20,
+        'min_sep_arcmin': 5.0,
+        'max_sep_arcmin': 250.0,
+        'var_method': 'bootstrap',
+        'cross_patch_weight': 'geom',
     },
     'catalog': {
         'seed': 42,
     },
+    'cache': {
+        'reuse_mock_catalogs': True,
+    }
 }

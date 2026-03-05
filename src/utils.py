@@ -39,6 +39,22 @@ def get_output_path(kind, bin_idx=None):
     raise ValueError(f"Unknown output path kind: {kind}")
 
 
+def normalize_profile(z, values, axis=-1):
+    """
+    Normalize profile(s) by trapezoidal integral over z.
+    Returns zeros where the integral is non-positive.
+    """
+    arr = np.asarray(values, dtype=float)
+    z = np.asarray(z, dtype=float)
+    norm = np.trapezoid(arr, z, axis=axis)
+
+    if arr.ndim == 1:
+        return arr / norm if norm > 0 else np.zeros_like(arr)
+
+    denom = np.expand_dims(norm, axis=axis)
+    return np.divide(arr, denom, out=np.zeros_like(arr), where=denom > 0)
+
+
 def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
     """
     Compute geometric widths and geometric enhancement.

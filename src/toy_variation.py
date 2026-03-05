@@ -83,15 +83,13 @@ def make_uncorrelated_nz_maps(
             - (np.log(np.maximum(z_2d, eps)) - mu)**2 / (2 * sig**2)
         ) / (np.maximum(z_2d, eps) * sig * np.sqrt(2*np.pi))
 
-        norms = np.trapezoid(profiles, z_fine, axis=1)
-        norms[norms == 0] = 1e-12
-        profiles /= norms[:, None]
+        profiles = utils.normalize_profile(z_fine, profiles, axis=1)
 
         # Optional uncorrelated profile noise.
         if noise_level > 0:
             profiles += noise_level * np.random.randn(*profiles.shape)
             profiles = np.maximum(profiles, 0)
-            profiles /= np.trapezoid(profiles, z_fine, axis=1)[:, None]
+            profiles = utils.normalize_profile(z_fine, profiles, axis=1)
 
         nbar_fine_sum += (profiles * batch_weights[:, None]).sum(axis=0)
         sigma_inv_local_sum += np.sum(np.trapezoid(profiles**2, z_fine, axis=1) * batch_weights)
@@ -128,7 +126,7 @@ def make_uncorrelated_nz_maps(
     profiles_subset = np.exp(
         - (np.log(np.maximum(z_2d, eps)) - mu_s)**2 / (2 * sg_s**2)
     ) / (np.maximum(z_2d, eps) * sg_s * np.sqrt(2*np.pi))
-    profiles_subset /= np.trapezoid(profiles_subset, z_fine, axis=1)[:, None]
+    profiles_subset = utils.normalize_profile(z_fine, profiles_subset, axis=1)
 
     return (
         n_maps,

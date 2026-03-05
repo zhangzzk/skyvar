@@ -9,7 +9,80 @@ import numpy as np
 import pyccl as ccl
 import healpy as hp
 
+try:
+    from . import config
+except ImportError:
+    import config
+
 logger = logging.getLogger(__name__)
+
+
+def ccl_correlation_compat(
+    cosmo: ccl.Cosmology,
+    ell: np.ndarray,
+    cls: np.ndarray,
+    theta_deg: np.ndarray,
+) -> np.ndarray:
+    for kwargs in (
+        {"type": "NN", "method": "fftlog"},
+        {},
+        {"corr_type": "gg"},
+        {"correlation_type": "gg"},
+        {"type": "gg"},
+    ):
+        for ell_key, cl_key in (("ell", "C_ell"), ("ell", "cl"), ("ells", "C_ell")):
+            try:
+                return ccl.correlation(
+                    cosmo=cosmo,
+                    **{ell_key: ell, cl_key: cls},
+                    theta=theta_deg,
+                    **kwargs,
+                )
+            except (TypeError, ValueError):
+                pass
+    return ccl.correlation(cosmo, ell, cls, theta_deg)
+
+
+def build_pyccl_cosmology() -> ccl.Cosmology:
+    """Build the fiducial pyccl cosmology from config."""
+    return ccl.Cosmology(
+        Omega_c=float(config.COSMO_PARAMS["Omega_c"]),
+        Omega_b=float(config.COSMO_PARAMS["Omega_b"]),
+        h=float(config.COSMO_PARAMS["h"]),
+        sigma8=float(config.COSMO_PARAMS["sigma8"]),
+        n_s=float(config.COSMO_PARAMS["n_s"]),
+    )
+
+
+def compute_theory_wtheta_from_dndz(
+    cosmo: ccl.Cosmology,
+    z: np.ndarray,
+    dndz: np.ndarray,
+    theta_deg: np.ndarray,
+    ell_min: int = 2,
+    ell_max: int = 3000,
+    bias: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    z = np.asarray(z, dtype=float)
+    dndz = np.asarray(dndz, dtype=float)
+    theta_deg = np.asarray(theta_deg, dtype=float)
+
+    if bias is None:
+        bias = np.ones_like(z)
+    else:
+        bias = np.asarray(bias, dtype=float)
+
+    tracer = ccl.NumberCountsTracer(
+        cosmo,
+        has_rsd=False,
+        dndz=(z, dndz),
+        bias=(z, bias),
+    )
+    ell = np.arange(int(ell_max) + 1, dtype=int)
+    cls = ccl.angular_cl(cosmo, tracer, tracer, ell)
+    if int(ell_min) > 0:
+        cls[: int(ell_min)] = 0.0
+    return ccl_correlation_compat(cosmo, ell, cls, theta_deg)
 
 
 @dataclass(frozen=True)
@@ -64,24 +137,7 @@ class ClusteringEnhancement:
         cls: np.ndarray,
         theta_deg: np.ndarray,
     ) -> np.ndarray:
-        for kwargs in (
-            {"type": "NN", "method": "fftlog"},
-            {},
-            {"corr_type": "gg"},
-            {"correlation_type": "gg"},
-            {"type": "gg"},
-        ):
-            for ell_key, cl_key in (("ell", "C_ell"), ("ell", "cl"), ("ells", "C_ell")):
-                try:
-                    return ccl.correlation(
-                        cosmo=cosmo,
-                        **{ell_key: ell, cl_key: cls},
-                        theta=theta_deg,
-                        **kwargs,
-                    )
-                except (TypeError, ValueError):
-                    pass
-        return ccl.correlation(cosmo, ell, cls, theta_deg)
+        return ccl_correlation_compat(cosmo, ell, cls, theta_deg)
 
     @staticmethod
     def _cl_to_wtheta_fullsky(cl: np.ndarray, theta_rad: np.ndarray, ell_min: int) -> np.ndarray:

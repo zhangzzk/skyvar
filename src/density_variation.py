@@ -1,44 +1,41 @@
 import os
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-
 import sys
+import logging
 from dataclasses import dataclass
 from importlib import import_module
 
-import camb
 import healpy as hp
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import pyccl
 import treecorr
 from astropy.io import fits
 
 try:
     from . import config
+    from . import selection
     from . import utils
-    from . import plotting as plt_nz
 except ImportError:
     import config
+    import selection
     import utils
-    import plotting as plt_nz
 
 
-DENSITY_SETTINGS = config.DENSITY_SETTINGS
-EXTERNAL_CFG = DENSITY_SETTINGS["external"]
-MOCK_CFG = DENSITY_SETTINGS["mock"]
-TREECORR_CFG = DENSITY_SETTINGS["treecorr"]
-THEORY_CFG = DENSITY_SETTINGS["theory"]
-CATALOG_CFG = DENSITY_SETTINGS["catalog"]
+logger = logging.getLogger(__name__)
 
-SYS_NSIDE = config.SIM_SETTINGS["sys_nside_stats"]
-N_POP_SAMPLE = config.SIM_SETTINGS["n_pop_sample"]
-OUTPUT_PREDS = utils.get_output_path("output_preds")
-MOCK_SYS_MAP = utils.get_output_path("mock_sys_map")
+SIM_CFG = config.SIM_SETTINGS
+DEN_CFG = config.DENSITY_SETTINGS
+TREECORR_CFG = DEN_CFG["treecorr"]
+MOCK_CFG = DEN_CFG["mock"]
+
+SYS_NSIDE = int(SIM_CFG["sys_nside_stats"])
 
 
 @dataclass(frozen=True)
 class DensityWThetaResult:
-    theta: np.ndarray
+    theta_orig: np.ndarray
+    theta_ur: np.ndarray
+    theta_or: np.ndarray
     w_orig: np.ndarray
     w_ur: np.ndarray
     w_or: np.ndarray
@@ -47,43 +44,147 @@ class DensityWThetaResult:
     cov_or: np.ndarray
 
 
-def get_tiaogeng_path() -> str:
-    """Resolve tiaogeng path from environment override or config default."""
-    return os.environ.get("TIAOGENG_PATH", EXTERNAL_CFG["tiaogeng_path"])
+def _density_cache_tag() -> str:
+    fp = config.SYSTEMATICS_CONFIG["footprint"]
+    size_deg = float(config.SYSTEMATICS_CONFIG["tiles"]["size_deg"])
+    ra0, ra1 = float(fp["ra_range"][0]) % 360.0, float(fp["ra_range"][1]) % 360.0
+    dec0, dec1 = float(fp["dec_range"][0]), float(fp["dec_range"][1])
+    nside = int(MOCK_CFG["glass_nside"])
+    n_arcmin2 = float(MOCK_CFG["n_arcmin2"])
+    z0 = float(MOCK_CFG.get("gaussian_mean", 0.6))
+    sig = float(MOCK_CFG.get("gaussian_sigma", 0.23))
+    source = str(MOCK_CFG.get("nz_source", "toy")).strip().lower()
+
+    return (
+        f"nside{nside}_narcmin{str(n_arcmin2).replace('.', 'p')}"
+        f"_tile{str(size_deg).replace('.', 'p')}"
+        f"_ra{str(ra0).replace('.', 'p')}_{str(ra1).replace('.', 'p')}"
+        f"_dec{str(dec0).replace('.', 'p')}_{str(dec1).replace('.', 'p')}"
+        f"_nz{source}_m{str(z0).replace('.', 'p')}_s{str(sig).replace('.', 'p')}"
+    )
 
 
-def load_tiaogeng_modules(tiaogeng_path: str):
-    """Import original external modules used by the prototype script."""
+def _load_generate_mocksys():
+    tiaogeng_path = DEN_CFG["external"]["tiaogeng_path"]
     src_path = os.path.join(tiaogeng_path, "codes", "src")
-    if not os.path.isdir(src_path):
-        raise FileNotFoundError(f"tiaogeng source path not found: {src_path}")
     if src_path not in sys.path:
         sys.path.append(src_path)
-
-    glass_mock = import_module("glass_mock")
-    generate_mocksys = import_module("generate_mocksys")
-    glass_shells = import_module("glass.shells")
-    return glass_mock, generate_mocksys, glass_shells
+    return import_module("generate_mocksys")
 
 
-def cat_to_hpcat(lon, lat, nside, keep=None, frac=None, mask=None, patch_centers=None, rng=None):
-    """
-    Pixelize a catalog and build TreeCorr catalog from occupied HEALPix pixels.
-    Matches the original script behavior.
-    """
-    if (frac is not None) and (keep is not None):
-        raise ValueError("Cannot specify both frac and keep.")
+def build_mean_p_map() -> np.ndarray:
+    """Notebook-consistent mean_p from cached predictions."""
+    preds_path = utils.get_output_path("output_preds")
+    if not os.path.exists(preds_path):
+        raise FileNotFoundError(f"Predictions file not found: {preds_path}")
+
+    df = pd.read_feather(preds_path)
+    required = {"pix_idx_input_p", "detection"}
+    missing = sorted(required.difference(df.columns))
+    if missing:
+        raise KeyError(f"Predictions file missing required columns: {missing}")
+
+    mock_sys_map_path = utils.get_output_path("mock_sys_map")
+    psf_hp_map = hp.read_map(mock_sys_map_path, field=0)
+    mean_p = np.full(psf_hp_map.shape, hp.UNSEEN)
+
+    _, seen_idx_stats, _ = selection.load_system_maps(return_sim_idx=True)
+
+    pix_idx_stats = selection.map_pix_sim_to_stats(
+        df["pix_idx_input_p"].to_numpy(),
+        nside_sim=SIM_CFG["sys_nside_sim"],
+        nside_stats=SYS_NSIDE,
+    )
+
+    num = np.bincount(pix_idx_stats, weights=df["detection"], minlength=mean_p.size)
+    den = np.bincount(pix_idx_stats, minlength=mean_p.size)
+    frac_pix = np.divide(num, den, out=np.zeros_like(num, dtype=float), where=den > 0)
+    mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
+
+    if bool(MOCK_CFG.get("normalize_detection_by_max", True)):
+        vmax = np.max(mean_p[seen_idx_stats]) if len(seen_idx_stats) > 0 else 0.0
+        if vmax > 0:
+            mean_p[seen_idx_stats] /= vmax
+
+    logger.info("Built mean_p map from %s", preds_path)
+    return mean_p
+
+
+def load_mock_catalogs() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Load glass data/random catalogs from configured cache path and tag."""
+    tag = _density_cache_tag()
+    base = config.PATHS["sys_preds_dir"]
+    glasscat = os.path.join(base, f"glass_testgalcat_density_{tag}.fits")
+    glasscat_rand = os.path.join(base, f"glass_testgalcat_rand_density_{tag}.fits")
+
+    if not os.path.exists(glasscat):
+        raise FileNotFoundError(f"Missing data catalog: {glasscat}")
+    if not os.path.exists(glasscat_rand):
+        raise FileNotFoundError(f"Missing random catalog: {glasscat_rand}")
+
+    with fits.open(glasscat) as h:
+        lon = h[1].data["RA"]
+        lat = h[1].data["Dec"]
+
+    with fits.open(glasscat_rand) as h:
+        lon_rand = h[1].data["RA"]
+        lat_rand = h[1].data["Dec"]
+
+    return lon, lat, lon_rand, lat_rand
+
+
+def apply_tile_filter(
+    lon: np.ndarray,
+    lat: np.ndarray,
+    lon_rand: np.ndarray,
+    lat_rand: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Keep only sources inside valid tiles (notebook style)."""
+    gm = _load_generate_mocksys()
+
+    fp = config.SYSTEMATICS_CONFIG["footprint"]
+    size_deg = float(config.SYSTEMATICS_CONFIG["tiles"]["size_deg"])
+    start_lon = float(fp["ra_range"][0])
+    start_lat = float(fp["dec_range"][0])
+    nlon = int(round((float(fp["ra_range"][1]) - start_lon) / size_deg))
+    nlat = int(round((float(fp["dec_range"][1]) - start_lat) / size_deg))
+
+    tiles = gm.tiles(start_lon, start_lat, size_deg, size_deg, nlon, nlat)
+
+    tileind = tiles.get_tileind_regular(lon, lat)
+    tileind_rand = tiles.get_tileind_regular(lon_rand, lat_rand)
+
+    keep = tileind != -1
+    keep_rand = tileind_rand != -1
+
+    return lon[keep], lat[keep], lon_rand[keep_rand], lat_rand[keep_rand]
+
+
+def pix2galaxy(lon: np.ndarray, lat: np.ndarray, hp_vals: np.ndarray, val_nside: int) -> np.ndarray:
+    hp_ind = hp.ang2pix(val_nside, lon, lat, lonlat=True)
+    return hp_vals[hp_ind]
+
+
+def cat_to_hpcat(
+    lon: np.ndarray,
+    lat: np.ndarray,
+    Ns: int,
+    keep: np.ndarray | None = None,
+    frac: np.ndarray | None = None,
+    mask: np.ndarray | None = None,
+    patch_centers=None,
+):
+    if frac is not None and keep is not None:
+        raise ValueError("Cannot specify both frac and keep!")
 
     if frac is not None:
-        if rng is None:
-            rng = np.random.default_rng()
-        rand = rng.random(size=frac.size)
-        keep = (rand < frac).astype(int)
+        rand = np.random.random(size=frac.size)
+        keep = (rand < np.clip(frac, 0.0, 1.0)).astype(int)
     elif keep is None:
-        keep = np.ones(lon.size, dtype=int)
+        keep = np.ones(lon.size)
 
-    hp_ind = hp.ang2pix(nside, lon, lat, lonlat=True)
-    gmap = np.zeros(hp.nside2npix(nside), dtype=float)
+    hp_ind = hp.ang2pix(Ns, lon, lat, lonlat=True)
+    gmap = np.zeros(hp.nside2npix(Ns))
     np.add.at(gmap, hp_ind, keep)
 
     if mask is None:
@@ -91,345 +192,157 @@ def cat_to_hpcat(lon, lat, nside, keep=None, frac=None, mask=None, patch_centers
     gmap *= mask
 
     hp_ind_unmasked = np.arange(mask.size)[(mask != 0) * (gmap > 0)]
-    hp_lon, hp_lat = hp.pix2ang(nside, hp_ind_unmasked, lonlat=True)
+    hp_lon, hp_lat = hp.pix2ang(Ns, hp_ind_unmasked, lonlat=True)
     delta = gmap[hp_ind_unmasked]
 
     if patch_centers is None:
-        cat = treecorr.Catalog(
+        return treecorr.Catalog(
             ra=hp_lon,
             dec=hp_lat,
             ra_units="deg",
             dec_units="deg",
             w=delta,
-            npatch=int(TREECORR_CFG["n_patches"]),
+            npatch=int(TREECORR_CFG.get("n_patches", 30)),
         )
-    else:
-        cat = treecorr.Catalog(
-            ra=hp_lon,
-            dec=hp_lat,
-            ra_units="deg",
-            dec_units="deg",
-            w=delta,
-            patch_centers=patch_centers,
-        )
-    return cat
 
-
-def pix2galaxy(lon, lat, hp_vals, val_nside):
-    """Assign each galaxy a value from a HEALPix map."""
-    hp_ind = hp.ang2pix(val_nside, lon, lat, lonlat=True)
-    return hp_vals[hp_ind]
+    return treecorr.Catalog(
+        ra=hp_lon,
+        dec=hp_lat,
+        ra_units="deg",
+        dec_units="deg",
+        w=delta,
+        patch_centers=patch_centers,
+    )
 
 
 def treecorr_nncor(
-    cat_data: treecorr.Catalog,
-    cat_rand: treecorr.Catalog,
-    nbins: int,
-    min_sep_arcmin: float,
-    max_sep_arcmin: float,
-    var_method: str,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute Landy-Szalay NN correlation with TreeCorr."""
-    nn_dd = treecorr.NNCorrelation(
+    catd,
+    catr,
+    min_sep=5,
+    max_sep=250,
+    nbins=20,
+    bin_slop=0.0,
+    sep_units="arcmin",
+    var_method="bootstrap",
+):
+    kwargs = dict(
+        min_sep=min_sep,
+        max_sep=max_sep,
         nbins=nbins,
-        min_sep=min_sep_arcmin,
-        max_sep=max_sep_arcmin,
-        sep_units="arcmin",
+        bin_slop=bin_slop,
+        sep_units=sep_units,
         var_method=var_method,
+        cross_patch_weight="geom",
     )
-    nn_dr = treecorr.NNCorrelation(
-        nbins=nbins,
-        min_sep=min_sep_arcmin,
-        max_sep=max_sep_arcmin,
-        sep_units="arcmin",
-        var_method=var_method,
-    )
-    nn_rr = treecorr.NNCorrelation(
-        nbins=nbins,
-        min_sep=min_sep_arcmin,
-        max_sep=max_sep_arcmin,
-        sep_units="arcmin",
-        var_method=var_method,
-    )
+    gg = treecorr.NNCorrelation(**kwargs)
+    rr = treecorr.NNCorrelation(**kwargs)
+    dr = treecorr.NNCorrelation(**kwargs)
+    rd = treecorr.NNCorrelation(**kwargs)
 
-    nn_dd.process(cat_data)
-    nn_dr.process(cat_data, cat_rand)
-    nn_rr.process(cat_rand)
+    gg.process(catd)
+    rr.process(catr)
+    dr.process(catd, catr)
+    rd.process(catr, catd)
 
-    xi, varxi = nn_dd.calculateXi(rr=nn_rr, dr=nn_dr)
-    theta = np.exp(nn_dd.meanlogr)
-
-    cov = getattr(nn_dd, "cov", None)
-    if cov is None or np.shape(cov) != (len(theta), len(theta)):
-        cov = np.diag(varxi)
-
-    return theta, xi, cov
+    w, _ = gg.calculateXi(rr=rr, dr=dr, rd=rd)
+    return gg.meanr, w, gg.cov
 
 
-def get_selection_weights_map(output_preds: str, mock_sys_map: str, sys_nside: int, n_pop_sample: int):
-    """Derive per-pixel selection weights from prediction catalog (original intent of selec_weights)."""
-    cla_cat = pd.read_feather(output_preds)
+def measure_wtheta(
+    lon: np.ndarray,
+    lat: np.ndarray,
+    lon_rand: np.ndarray,
+    lat_rand: np.ndarray,
+    mean_p: np.ndarray,
+) -> DensityWThetaResult:
+    frac_per_galaxy = pix2galaxy(lon, lat, mean_p, SYS_NSIDE)
+    frac_per_galaxy_rand = pix2galaxy(lon_rand, lat_rand, mean_p, SYS_NSIDE)
 
-    maps = hp.read_map(mock_sys_map, field=None)
-    psf_hp_map = maps[0]
-    seen_idx = np.where(~np.isnan(psf_hp_map))[0]
+    gal_nside = int(TREECORR_CFG.get("gal_nside", 1024))
 
-    npix = hp.nside2npix(sys_nside)
-    det_counts = np.bincount(
-        cla_cat["pix_idx_input_p"].to_numpy(dtype=int),
-        weights=cla_cat["detection"].to_numpy(dtype=float),
-        minlength=npix,
-    )
+    catd_selec = cat_to_hpcat(lon, lat, gal_nside, frac=frac_per_galaxy)
+    catd_orig = cat_to_hpcat(lon, lat, gal_nside, patch_centers=catd_selec.patch_centers)
+    catr_or = cat_to_hpcat(lon_rand, lat_rand, gal_nside, frac=frac_per_galaxy_rand, patch_centers=catd_selec.patch_centers)
+    catr_ur = cat_to_hpcat(lon_rand, lat_rand, gal_nside, patch_centers=catd_selec.patch_centers)
 
-    selec_weights = np.zeros(npix, dtype=float)
-    selec_weights[seen_idx] = det_counts[seen_idx] / float(n_pop_sample)
-    return selec_weights, seen_idx
+    treecorr.config.thread_count = int(TREECORR_CFG.get("n_threads", 20))
 
+    nbins = int(TREECORR_CFG.get("nbins", 20))
+    min_sep = float(TREECORR_CFG.get("min_sep_arcmin", 5.0))
+    max_sep = float(TREECORR_CFG.get("max_sep_arcmin", 250.0))
+    var_method = str(TREECORR_CFG.get("var_method", "bootstrap"))
 
-def build_mock_catalogs(glass_mock, glass_shells, generate_mocksys, gls_path: str, tiaogeng_path: str):
-    """Build original GLASS mock and uniform-random catalogs."""
-    h = float(config.COSMO_PARAMS["h"])
-    omega_c = float(config.COSMO_PARAMS["Omega_c"])
-    omega_b = float(config.COSMO_PARAMS["Omega_b"])
-    bias = float(MOCK_CFG["bias"])
-    nside = int(MOCK_CFG["glass_nside"])
-    n_arcmin2 = float(MOCK_CFG["n_arcmin2"])
-
-    z = np.linspace(float(MOCK_CFG["z_min"]), float(MOCK_CFG["z_max"]), int(MOCK_CFG["z_samples"]))
-    dz = (z[-1] - z[0]) / z.size
-    dndz = np.exp(-((z - float(MOCK_CFG["dndz_mean"])) ** 2) / (2 * float(MOCK_CFG["dndz_sigma"]) ** 2))
-    dndz /= (dndz.sum() * dz)
-
-    zb = glass_shells.redshift_grid(z[0], z[-1], dz=float(MOCK_CFG["shell_dz"]))
-    _ = glass_shells.tophat_windows(zb, dz=float(MOCK_CFG["window_dz"]))
-
-    pars = camb.set_params(
-        H0=100 * h,
-        omch2=omega_c * h**2,
-        ombh2=omega_b * h**2,
-        WantTransfer=True,
-        NonLinear=camb.model.NonLinear_both,
-        halofit_version="takahashi",
-    )
-
-    gls = np.loadtxt(gls_path)
-
-    fp = MOCK_CFG["footprint"]
-    dx = float(fp["dx"])
-    dy = float(fp["dy"])
-    nlon = int(fp["nlon"])
-    nlat = int(fp["nlat"])
-    start_lon = float(fp["start_lon"])
-    start_lat = float(fp["start_lat"])
-
-    vec_vertices = hp.ang2vec(
-        np.array([start_lon, start_lon, start_lon + nlon, start_lon + nlon]),
-        np.array([start_lat, start_lat + nlat, start_lat + nlat, start_lat]),
-        lonlat=True,
-    )
-    vis = np.zeros(hp.nside2npix(nside))
-    vis[hp.query_polygon(nside, vec_vertices)] = 1.0
-
-    test_tiles = generate_mocksys.tiles(start_lon, start_lat, dx, dy, nlon, nlat)
-
-    glasscat = os.path.join(tiaogeng_path, f"data/glass_testgalcat_density_{n_arcmin2}.fits")
-    glasscat_unirand = os.path.join(tiaogeng_path, f"data/glass_testgalcat_rand_density_{n_arcmin2}.fits")
-
-    glass_mock.glass_mock(omega_c, omega_b, h, bias, z, n_arcmin2, dndz, vis, nside, glasscat, gls=gls)
-    glass_mock.glass_mock(
-        omega_c,
-        omega_b,
-        h,
-        bias,
-        z,
-        n_arcmin2,
-        dndz,
-        vis,
-        nside,
-        glasscat_unirand,
-        gls=gls,
-        random=True,
-    )
-
-    return {
-        "glasscat": glasscat,
-        "glasscat_unirand": glasscat_unirand,
-        "tiles": test_tiles,
-        "z": z,
-        "dndz": dndz,
-        "pars": pars,
-    }
-
-
-def load_and_filter_tile_catalogs(glasscat: str, glasscat_unirand: str, test_tiles):
-    """Load generated FITS catalogs and keep objects inside tiles."""
-    with fits.open(glasscat) as hdul:
-        lons = hdul[1].data["RA"]
-        lats = hdul[1].data["Dec"]
-
-    with fits.open(glasscat_unirand) as hdul:
-        lons_rand = hdul[1].data["RA"]
-        lats_rand = hdul[1].data["Dec"]
-
-    source_tileind = test_tiles.get_tileind(lons, lats)
-    source_tileind_rand = test_tiles.get_tileind(lons_rand, lats_rand)
-
-    keep = source_tileind != -1
-    keep_rand = source_tileind_rand != -1
-
-    return lons[keep], lats[keep], lons_rand[keep_rand], lats_rand[keep_rand]
-
-
-def measure_wtheta(lons, lats, lons_rand, lats_rand, selec_weights, sys_nside, seed: int):
-    """Compute original trio of w(theta): baseline, uniform-random, organized-random."""
-    frac_per_galaxy = pix2galaxy(lons, lats, selec_weights, sys_nside)
-    frac_per_galaxy_rand = pix2galaxy(lons_rand, lats_rand, selec_weights, sys_nside)
-
-    gal_nside = int(TREECORR_CFG["gal_nside"])
-
-    rng = np.random.default_rng(seed)
-
-    catd_selec = cat_to_hpcat(lons, lats, gal_nside, frac=frac_per_galaxy, rng=rng)
-    catd_orig = cat_to_hpcat(lons, lats, gal_nside, patch_centers=catd_selec.patch_centers)
-    catr_or = cat_to_hpcat(lons_rand, lats_rand, gal_nside, frac=frac_per_galaxy_rand, rng=rng,
-                           patch_centers=catd_selec.patch_centers)
-    catr_ur = cat_to_hpcat(lons_rand, lats_rand, gal_nside, patch_centers=catd_selec.patch_centers)
-
-    treecorr.config.thread_count = int(TREECORR_CFG["n_threads"])
-
-    theta_ur, w_ur, cov_ur = treecorr_nncor(
-        catd_selec,
-        catr_ur,
-        nbins=int(TREECORR_CFG["nbins"]),
-        min_sep_arcmin=float(TREECORR_CFG["min_sep_arcmin"]),
-        max_sep_arcmin=float(TREECORR_CFG["max_sep_arcmin"]),
-        var_method=str(TREECORR_CFG["var_method"]),
-    )
-    theta_or, w_or, cov_or = treecorr_nncor(
-        catd_selec,
-        catr_or,
-        nbins=int(TREECORR_CFG["nbins"]),
-        min_sep_arcmin=float(TREECORR_CFG["min_sep_arcmin"]),
-        max_sep_arcmin=float(TREECORR_CFG["max_sep_arcmin"]),
-        var_method=str(TREECORR_CFG["var_method"]),
-    )
-    theta, w_orig, cov_orig = treecorr_nncor(
-        catd_orig,
-        catr_ur,
-        nbins=int(TREECORR_CFG["nbins"]),
-        min_sep_arcmin=float(TREECORR_CFG["min_sep_arcmin"]),
-        max_sep_arcmin=float(TREECORR_CFG["max_sep_arcmin"]),
-        var_method=str(TREECORR_CFG["var_method"]),
-    )
-
-    if not (np.allclose(theta, theta_ur) and np.allclose(theta, theta_or)):
-        raise RuntimeError("Inconsistent theta bins across TreeCorr measurements.")
+    theta_ur, w_ur, cov_ur = treecorr_nncor(catd_selec, catr_ur, nbins=nbins, max_sep=max_sep, min_sep=min_sep, var_method=var_method)
+    theta_or, w_or, cov_or = treecorr_nncor(catd_selec, catr_or, nbins=nbins, max_sep=max_sep, min_sep=min_sep, var_method=var_method)
+    theta, w, cov = treecorr_nncor(catd_orig, catr_ur, nbins=nbins, max_sep=max_sep, min_sep=min_sep, var_method=var_method)
 
     return DensityWThetaResult(
-        theta=theta,
-        w_orig=w_orig,
+        theta_orig=theta,
+        theta_ur=theta_ur,
+        theta_or=theta_or,
+        w_orig=w,
         w_ur=w_ur,
         w_or=w_or,
-        cov_orig=cov_orig,
+        cov_orig=cov,
         cov_ur=cov_ur,
         cov_or=cov_or,
     )
 
 
-def theory_wtheta(theta_arcmin, z, dndz, pars):
-    """Reproduce original pyccl theory curve."""
-    cosmo_pyccl = pyccl.Cosmology(
-        Omega_c=float(config.COSMO_PARAMS["Omega_c"]),
-        Omega_b=float(config.COSMO_PARAMS["Omega_b"]),
-        h=float(config.COSMO_PARAMS["h"]),
-        n_s=float(config.COSMO_PARAMS["n_s"]),
-        A_s=pars.InitPower.As,
+def plot_wtheta(result: DensityWThetaResult, save_path: str):
+    plt.figure(figsize=(8, 6))
+    plt.errorbar(
+        result.theta_orig,
+        result.theta_orig * result.w_orig,
+        yerr=result.theta_orig * np.sqrt(np.maximum(np.diag(result.cov_orig), 0.0)),
+        fmt=".",
+        label="no selection",
     )
-    tracer = pyccl.NumberCountsTracer(
-        cosmo_pyccl,
-        has_rsd=False,
-        dndz=(z, dndz),
-        bias=(z, np.ones_like(z)),
+    plt.errorbar(
+        result.theta_ur,
+        result.theta_ur * result.w_ur,
+        yerr=result.theta_ur * np.sqrt(np.maximum(np.diag(result.cov_ur), 0.0)),
+        fmt=".",
+        label="uniform random",
     )
-
-    ell = np.linspace(0, float(THEORY_CFG["ell_max"]), int(THEORY_CFG["ell_samples"]))
-    cell = pyccl.angular_cl(cosmo_pyccl, tracer, tracer, ell)
-    return pyccl.correlation(cosmo_pyccl, ell=ell, C_ell=cell, theta=np.asarray(theta_arcmin) / 60.0)
-
-
-def to_plot_payload(result: DensityWThetaResult) -> dict[str, np.ndarray]:
-    """Convert result dataclass to plotting payload used across the package."""
-    return {
-        "theta": result.theta,
-        "w_orig": result.w_orig,
-        "w_ur": result.w_ur,
-        "w_or": result.w_or,
-        "cov_orig": result.cov_orig,
-        "cov_ur": result.cov_ur,
-        "cov_or": result.cov_or,
-    }
+    plt.errorbar(
+        result.theta_or,
+        result.theta_or * result.w_or,
+        yerr=result.theta_or * np.sqrt(np.maximum(np.diag(result.cov_or), 0.0)),
+        fmt=".",
+        label="organized random",
+    )
+    plt.xscale("log")
+    plt.xlabel(r"$\theta$ [arcmin]")
+    plt.ylabel(r"$\theta \cdot w(\theta)$")
+    plt.title("Angular Correlation: Density Variation")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
 
 
 def main() -> None:
-    output_dir = "output"
+    logging.basicConfig(
+        level=getattr(logging, SIM_CFG.get("log_level", "INFO")),
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    )
+
+    mean_p = build_mean_p_map()
+
+    lon, lat, lon_rand, lat_rand = load_mock_catalogs()
+    lon, lat, lon_rand, lat_rand = apply_tile_filter(lon, lat, lon_rand, lat_rand)
+    logger.info("Tile-filtered mock catalog sizes: data=%d random=%d", lon.size, lon_rand.size)
+
+    result = measure_wtheta(lon, lat, lon_rand, lat_rand, mean_p)
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    output_dir = os.path.join(project_root, "output")
     os.makedirs(output_dir, exist_ok=True)
-    seed = int(CATALOG_CFG["seed"])
-    tiaogeng_path = get_tiaogeng_path()
-    gls_path = os.path.join(tiaogeng_path, "data", EXTERNAL_CFG["gls_filename"])
+    out_path = os.path.join(output_dir, "wtheta_density_variation.png")
 
-    if not os.path.exists(OUTPUT_PREDS):
-        print(f"Error: Predictions file {OUTPUT_PREDS} not found. Run selection.py first.")
-        return
-    if not os.path.exists(MOCK_SYS_MAP):
-        print(f"Error: Systematics map {MOCK_SYS_MAP} not found. Run systematics.py first.")
-        return
-    if not os.path.exists(gls_path):
-        print(f"Error: GLASS spectrum file {gls_path} not found.")
-        return
-
-    # 1) External module loading (original dependency)
-    glass_mock, generate_mocksys, glass_shells = load_tiaogeng_modules(tiaogeng_path)
-
-    # 2) Build/Load GLASS mocks (original workflow)
-    mock_meta = build_mock_catalogs(
-        glass_mock,
-        glass_shells,
-        generate_mocksys,
-        gls_path=gls_path,
-        tiaogeng_path=tiaogeng_path,
-    )
-
-    # 3) Keep only galaxies in tiles (same as original)
-    lons, lats, lons_rand, lats_rand = load_and_filter_tile_catalogs(
-        mock_meta["glasscat"],
-        mock_meta["glasscat_unirand"],
-        mock_meta["tiles"],
-    )
-
-    # 4) Load selection map from package outputs (fills original 'selec_weights' intent)
-    selec_weights, _ = get_selection_weights_map(
-        output_preds=OUTPUT_PREDS,
-        mock_sys_map=MOCK_SYS_MAP,
-        sys_nside=SYS_NSIDE,
-        n_pop_sample=N_POP_SAMPLE,
-    )
-
-    # 5) Measure correlation with different random strategies
-    result = measure_wtheta(lons, lats, lons_rand, lats_rand, selec_weights, SYS_NSIDE, seed=seed)
-
-    # 6) Theory and plotting (original comparison)
-    w_theory = theory_wtheta(
-        theta_arcmin=result.theta,
-        z=mock_meta["z"],
-        dndz=mock_meta["dndz"],
-        pars=mock_meta["pars"],
-    )
-
-    plt_nz.plot_wtheta_comparison(
-        to_plot_payload(result),
-        w_theory=w_theory,
-        save_path=os.path.join(output_dir, "wtheta_density_variation.png"),
-    )
+    plot_wtheta(result, out_path)
+    logger.info("Saved: %s", out_path)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import pyccl as ccl
 from astropy.io import fits
 
 logger = logging.getLogger(__name__)
@@ -14,13 +13,13 @@ try:
     from . import utils
     from . import config
     from . import plotting as plt_nz
-    from .clustering import ClusteringEnhancement
+    from .clustering import ClusteringEnhancement, build_pyccl_cosmology
 except ImportError:
     import selection as sel
     import utils
     import config
     import plotting as plt_nz
-    from clustering import ClusteringEnhancement
+    from clustering import ClusteringEnhancement, build_pyccl_cosmology
 
 # Add enhance directory to path to ensure local imports work
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -74,13 +73,7 @@ def main():
         return
 
     # 2. Setup Clustering Enhancement
-    cosmo = ccl.Cosmology(
-        Omega_c=config.COSMO_PARAMS['Omega_c'], 
-        Omega_b=config.COSMO_PARAMS['Omega_b'], 
-        h=config.COSMO_PARAMS['h'], 
-        sigma8=config.COSMO_PARAMS['sigma8'], 
-        n_s=config.COSMO_PARAMS['n_s']
-    )
+    cosmo = build_pyccl_cosmology()
     
     ce = ClusteringEnhancement(
         cosmo, 

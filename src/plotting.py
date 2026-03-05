@@ -11,11 +11,61 @@ logger = logging.getLogger(__name__)
 try:
     from . import config
     from . import utils
+    from .clustering import compute_theory_wtheta_from_dndz
 except ImportError:
     import config
     import utils
+    from clustering import compute_theory_wtheta_from_dndz
 
 from scipy.stats import norm
+
+PLOT_CFG = {
+    "map": {
+        "map_frac": 0.75,
+        "hist_frac": 0.15,
+        "gap": 0.06,
+        "left": 0.06,
+        "width_in": 12.0,
+        "margin_top_in": 0.2,
+        "margin_bottom_in": 0.5,
+        "vspace_in": 0.6,
+        "dpi": 200,
+        "label_fontsize": 18,
+        "tick_fontsize": 14,
+        "hist_label_fontsize": 16,
+        "hist_tick_fontsize": 13,
+        "hist_curve_lw": 1.8,
+    },
+    "clustering": {
+        "full_figsize": (8.2, 8.6),
+        "tomo_figsize": (18, 12),
+        "outer_wspace": 0.24,
+        "outer_hspace": 0.22,
+        "inner_hspace": 0.08,
+        "title_pad": 10,
+        "title_fontsize": 18,
+        "label_fontsize": 16,
+        "tick_fontsize": 13,
+        "legend_fontsize": 13,
+        "save_dpi": 240,
+        "w_model_lw": 2.8,
+        "w_true_lw": 2.8,
+        "ratio_lw": 2.6,
+        "delta_tot_lw": 2.8,
+        "delta_term_lw": 2.2,
+    },
+    "nz": {
+        "figsize": (12.5, 7.2),
+        "full_figsize": (8.0, 6.0),
+        "dpi": 240,
+        "title_fontsize": 18,
+        "label_fontsize": 16,
+        "tick_fontsize": 13,
+        "legend_fontsize": 13,
+        "pix_lw": 0.9,
+        "main_lw": 3.0,
+    },
+}
 
 def plot_selection_wtheta(result, theta_arcmin, output_dir, filename="selection_wtheta_z.png"):
     """Plot spatial variation of n(z) density correlation."""
@@ -95,7 +145,7 @@ def plot_model_vs_ccl(result, cosmo, nbar, z, output_dir, filename="w_model_vs_c
     plt.figure(figsize=(7, 5))
     plt.plot(theta_arcmin, theta_arcmin * result.w_model, "k--", linewidth=2, label=r"$w_{\rm model}$ (binned)")
     
-    dndz_global = nbar / np.trapezoid(nbar, z)
+    dndz_global = utils.normalize_profile(z, nbar)
     gtracer = ccl.NumberCountsTracer(
         cosmo,
         has_rsd=False,
@@ -188,17 +238,14 @@ def plot_model_diagnostics(all_results, all_stats, output_dir):
             sigma8=config.COSMO_PARAMS['sigma8'], 
             n_s=config.COSMO_PARAMS['n_s']
         )
-        ell = np.arange(config.CLUSTERING_SETTINGS['ell_max'] + 1, dtype=int)
-        tracer = ccl.NumberCountsTracer(
-            cosmo,
-            has_rsd=False,
-            dndz=(res.z_mid, res.nbar),
-            bias=(res.z_mid, np.ones_like(res.z_mid)),
+        w_direct = compute_theory_wtheta_from_dndz(
+            cosmo=cosmo,
+            z=res.z_mid,
+            dndz=res.nbar,
+            theta_deg=res.theta_deg,
+            ell_min=config.CLUSTERING_SETTINGS['ell_min'],
+            ell_max=config.CLUSTERING_SETTINGS['ell_max'],
         )
-        cls = ccl.angular_cl(cosmo, tracer, tracer, ell)
-        if config.CLUSTERING_SETTINGS['ell_min'] > 0:
-            cls[: config.CLUSTERING_SETTINGS['ell_min']] = 0.0
-        w_direct = ccl.correlation(cosmo, ell=ell, C_ell=cls, theta=res.theta_deg)
         
         ax.plot(theta_arcmin, w_direct * theta_arcmin, 'g-', lw=2, label=r'$w_{\rm total}$ (direct CCL)')
 
@@ -257,14 +304,7 @@ def plot_all_comparisons(all_results, geometric_factors, output_dir):
 def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
             ax=None, ra_range=None, dec_range=None, cbar_ax=None,
             vmin=None, vmax=None, fig_width_in=None):
-    """Plot HEALPix map for seen pixels.
-
-    Parameters
-    ----------
-    fig_width_in : float, optional
-        Width of the map axes in inches (used to compute adaptive marker
-        size).  When *None* the marker size falls back to a default.
-    """
+    """Plot HEALPix map for seen pixels."""
     n_pix = hp.nside2npix(sys_nside)
     lon, lat = hp.pix2ang(sys_nside, np.arange(n_pix), lonlat=True)
 
@@ -281,34 +321,36 @@ def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
     else:
         show_plot = False
 
-    # Adaptive marker size: make each HEALPix pixel fill its area.
-    pix_res_deg = np.degrees(hp.nside2resol(sys_nside))  # pixel spacing
+    pix_res_deg = np.degrees(hp.nside2resol(sys_nside))
     if ra_range is not None:
         ra_span = max(ra_range) - min(ra_range)
     else:
         ra_span = lon[mask].max() - lon[mask].min() + 2
     if fig_width_in is None:
         fig_width_in = ax.get_figure().get_figwidth()
-    dpi = ax.get_figure().dpi
-    # marker diameter in points, then square for area
+
     marker_pts = pix_res_deg / ra_span * fig_width_in * 72
-    s = marker_pts ** 2 *2
+    s = marker_pts ** 2 * 2
 
     sc = ax.scatter(lon[mask], lat[mask], c=map_data[mask], s=s,
                     cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none',
                     marker='s', rasterized=True)
 
-    # cbar_ax=None → no colorbar; explicit Axes → draw into it
     if cbar_ax is not None:
-        plt.colorbar(sc, cax=cbar_ax, label=label)
+        cbar = plt.colorbar(sc, cax=cbar_ax, label=label)
+        cbar.ax.tick_params(labelsize=PLOT_CFG['map']['hist_tick_fontsize'])
+        cbar.set_label(label, fontsize=PLOT_CFG['map']['hist_label_fontsize'])
     elif label is not None:
-        plt.colorbar(sc, ax=ax, label=label, fraction=0.02, pad=0.02)
+        cbar = plt.colorbar(sc, ax=ax, label=label, fraction=0.02, pad=0.02)
+        cbar.ax.tick_params(labelsize=PLOT_CFG['map']['hist_tick_fontsize'])
+        cbar.set_label(label, fontsize=PLOT_CFG['map']['hist_label_fontsize'])
 
-    ax.set_xlabel("RA [deg]")
-    ax.set_ylabel("Dec [deg]")
+    ax.set_xlabel('RA [deg]', fontsize=PLOT_CFG['map']['label_fontsize'])
+    ax.set_ylabel('Dec [deg]', fontsize=PLOT_CFG['map']['label_fontsize'])
+    ax.tick_params(axis='both', labelsize=PLOT_CFG['map']['tick_fontsize'])
 
     if ra_range is not None:
-        ax.set_xlim(max(ra_range), min(ra_range))   # RA decreases left→right
+        ax.set_xlim(max(ra_range), min(ra_range))
     else:
         ax.set_xlim(lon[mask].max() + 1, lon[mask].min() - 1)
     if dec_range is not None:
@@ -320,7 +362,6 @@ def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
 
     if save_path:
         plt.savefig(save_path)
-
     if show_plot:
         plt.close()
 
@@ -348,39 +389,40 @@ def plot_geo_factor_z(z_mid, n_maps, nbar, output_dir, filename="geo_factor_z.pn
     plt.close()
 
 def plot_tomographic_bins(results, output_dir):
-    """Plot the global n(z) for all tomographic bins on one plot with variations."""
-    plt.figure(figsize=(12, 6))
-    tomo_keys = sorted([k for k in results.keys() if k.startswith('tomo_')], 
+    """Plot tomographic n(z) with white background and no grid."""
+    cfg = PLOT_CFG['nz']
+    fig, ax = plt.subplots(figsize=cfg['figsize'], facecolor='white')
+    ax.set_facecolor('white')
+    ax.grid(False)
+
+    tomo_keys = sorted([k for k in results.keys() if k.startswith('tomo_')],
                        key=lambda x: int(x.split('_')[1]))
-    
+
     standard_colors = ['#3f51b5', '#e91e63', '#4caf50', '#ff9800', '#9c27b0', '#607d8b']
-    if len(tomo_keys) <= len(standard_colors):
-        colors = standard_colors[:len(tomo_keys)]
-    else:
-        colors = plt.cm.tab10(np.linspace(0, 1, len(tomo_keys)))
-    
+    colors = standard_colors[:len(tomo_keys)] if len(tomo_keys) <= len(standard_colors) else plt.cm.tab10(np.linspace(0, 1, len(tomo_keys)))
+
     for i, key in enumerate(tomo_keys):
         stats = results[key]
         z = stats['z']
         dndzs = stats['dndzs']
         color = colors[i]
-        
+
         n_pixels = dndzs.shape[0]
         n_plot = min(n_pixels, 150)
         step = max(1, n_pixels // n_plot)
         for j in range(0, n_pixels, step):
-            plt.plot(z, dndzs[j], color=color, alpha=0.2, lw=0.5)
+            ax.plot(z, dndzs[j], color=color, alpha=0.22, lw=cfg['pix_lw'])
 
-        plt.plot(z, stats['dndz_det'], color=color, lw=2., label=f"Bin {i}")
+        ax.plot(z, stats['dndz_det'], color=color, lw=cfg['main_lw'], label=f'Bin {i}')
 
-    plt.xlim(0, 1.6)
-    plt.xlabel('Redshift $z$')
-    plt.ylabel('$n(z)$')
-    plt.title('Tomographic Bin Redshift Distributions (with spatial variations)')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    plt.savefig(os.path.join(output_dir, "tomographic_bins_nz.png"))
-    plt.close()
+    ax.set_xlim(0, 1.6)
+    ax.set_xlabel('Redshift $z$', fontsize=cfg['label_fontsize'])
+    ax.set_ylabel('$n(z)$', fontsize=cfg['label_fontsize'])
+    ax.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+    ax.legend(fontsize=cfg['legend_fontsize'])
+
+    plt.savefig(os.path.join(output_dir, 'tomographic_bins_nz.png'), dpi=cfg['dpi'], facecolor='white')
+    plt.close(fig)
 
 def plot_snr_fractions(cla_cat, output_dir, z=None, edges=None):
     """Plot SNR fractions of detected galaxies."""
@@ -650,40 +692,37 @@ def plot_systematics_histograms(maps, labels, mask, output_path):
     plt.close()
 
 def _colorbar_histogram(ax, data, label, cmap=plt.cm.coolwarm, vmin=None, vmax=None):
-    """Draw an integrated colorbar+histogram: gradient background with KDE silhouette."""
-    from scipy.ndimage import gaussian_filter1d
+    """Integrated colorbar + histogram silhouette without style grid lines."""
+    map_cfg = PLOT_CFG['map']
 
     if vmin is None:
         vmin = np.percentile(data, 2)
     if vmax is None:
         vmax = np.percentile(data, 98)
 
-    # Histogram counts for the filled silhouette
     bins = np.linspace(vmin, vmax, 80)
     counts, edges = np.histogram(data, bins=bins, density=True)
     centers = 0.5 * (edges[:-1] + edges[1:])
-    smooth = gaussian_filter1d(counts, sigma=2)
+    y = counts
 
-    # Gradient background image
     gradient = np.linspace(0, 1, 256).reshape(1, -1)
+    ymax = max(float(np.max(y)), 1e-12) * 1.15
     ax.imshow(gradient, aspect='auto', cmap=cmap,
-              extent=[vmin, vmax, 0, smooth.max() * 1.15], origin='lower')
-
-    # Filled histogram silhouette (semi-transparent grey)
-    ax.fill_between(centers, 0, smooth, color='grey', alpha=0.45)
-    ax.plot(centers, smooth, color='k', linewidth=1.2)
+              extent=[vmin, vmax, 0, ymax], origin='lower')
+    ax.fill_between(centers, 0, y, color='grey', alpha=0.45)
+    ax.plot(centers, y, color='k', linewidth=map_cfg['hist_curve_lw'])
 
     ax.set_xlim(vmin, vmax)
-    ax.set_ylim(0, smooth.max() * 1.15)
-    ax.set_xlabel(label)
+    ax.set_ylim(0, ymax)
+    ax.set_xlabel(label, fontsize=map_cfg['hist_label_fontsize'])
     ax.set_yticks([])
-
+    ax.tick_params(axis='x', labelsize=map_cfg['hist_tick_fontsize'])
+    ax.grid(False)
 
 def plot_systematics_overview(maps, labels, nside, mask, output_path,
                               ra_range=None, dec_range=None,
                               hist_vlims=None):
-    """Plot maps with integrated colorbar-histogram panels.
-    """
+    """Plot maps with integrated colorbar-histogram panels."""
     n_maps = len(maps)
     n_pix = hp.nside2npix(nside)
     lon, lat = hp.pix2ang(nside, np.arange(n_pix), lonlat=True)
@@ -695,35 +734,31 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
         dec_lo, dec_hi = lat[mask].min(), lat[mask].max()
     else:
         dec_lo, dec_hi = min(dec_range), max(dec_range)
-    ra_span = ra_hi - ra_lo
-    dec_span = dec_hi - dec_lo
 
     if hist_vlims is None:
         hist_vlims = [None] * n_maps
 
-    # Layout: place axes manually so that the histogram panel
-    # exactly matches the rendered map height (after aspect='equal').
-    map_frac = 0.75          # fraction of fig width for the map
-    hist_frac = 0.15         # fraction of fig width for the histogram
-    gap = 0.06               # horizontal gap between map and hist
-    row_aspect = dec_span / ra_span   # height/width of the map content
+    map_cfg = PLOT_CFG['map']
+    map_frac = map_cfg['map_frac']
+    hist_frac = map_cfg['hist_frac']
+    gap = map_cfg['gap']
+    row_aspect = (dec_hi - dec_lo) / (ra_hi - ra_lo)
 
-    map_width_in = 12.0
+    map_width_in = map_cfg['width_in']
     row_h_in = map_width_in * map_frac * row_aspect
-    vgap_in = 0.6            # vertical gap between rows (inches)
-    margin_top = 0.2         # top margin (inches)
-    margin_bot = 0.5         # bottom margin for xlabel (inches)
+    vgap_in = map_cfg['vspace_in']
+    margin_top = map_cfg['margin_top_in']
+    margin_bot = map_cfg['margin_bottom_in']
     fig_h = n_maps * row_h_in + (n_maps - 1) * vgap_in + margin_top + margin_bot
 
     fig = plt.figure(figsize=(map_width_in, fig_h))
 
     for i, (map_data, label) in enumerate(zip(maps, labels)):
-        # Vertical position (top to bottom), respecting margins
         row_bottom = (margin_bot + (n_maps - 1 - i) * (row_h_in + vgap_in)) / fig_h
 
-        ax_map = fig.add_axes([0.06, row_bottom, map_frac, row_h_in / fig_h])
-        ax_cb  = fig.add_axes([0.06 + map_frac + gap, row_bottom,
-                               hist_frac, row_h_in / fig_h])
+        ax_map = fig.add_axes([map_cfg['left'], row_bottom, map_frac, row_h_in / fig_h])
+        ax_cb = fig.add_axes([map_cfg['left'] + map_frac + gap, row_bottom,
+                              hist_frac, row_h_in / fig_h])
 
         data = map_data[mask]
         data = data[~np.isnan(data)]
@@ -740,8 +775,235 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
 
         _colorbar_histogram(ax_cb, data, label, vmin=vmin, vmax=vmax)
 
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.savefig(output_path, dpi=map_cfg['dpi'], bbox_inches='tight')
     plt.close()
+
+
+def plot_detection_rate_overview(frac_pix, seen_idx, nside, output_path,
+                                 ra_range=None, dec_range=None,
+                                 label='Detection Fraction', vlim=None):
+    """Plot detection-rate map with the same style as systematics overview."""
+    seen_idx = np.asarray(seen_idx, dtype=int)
+    frac_pix = np.asarray(frac_pix, dtype=float)
+
+    npix = hp.nside2npix(nside)
+    det_map = np.full(npix, np.nan, dtype=float)
+    det_map[seen_idx] = frac_pix
+
+    lon, lat = hp.pix2ang(nside, np.arange(npix), lonlat=True)
+    if ra_range is None:
+        ra_lo, ra_hi = lon[seen_idx].min(), lon[seen_idx].max()
+    else:
+        ra_lo, ra_hi = min(ra_range), max(ra_range)
+    if dec_range is None:
+        dec_lo, dec_hi = lat[seen_idx].min(), lat[seen_idx].max()
+    else:
+        dec_lo, dec_hi = min(dec_range), max(dec_range)
+
+    data = frac_pix[np.isfinite(frac_pix)]
+    if vlim is None:
+        vmin, vmax = np.percentile(data, [0.1, 99.9])
+    else:
+        vmin, vmax = vlim
+
+    map_cfg = PLOT_CFG['map']
+    map_frac = map_cfg['map_frac']
+    hist_frac = map_cfg['hist_frac']
+    gap = map_cfg['gap']
+    row_aspect = (dec_hi - dec_lo) / (ra_hi - ra_lo)
+
+    map_width_in = map_cfg['width_in']
+    row_h_in = map_width_in * map_frac * row_aspect
+    margin_top = map_cfg['margin_top_in']
+    margin_bot = map_cfg['margin_bottom_in']
+    fig_h = row_h_in + margin_top + margin_bot
+
+    fig = plt.figure(figsize=(map_width_in, fig_h))
+    row_bottom = margin_bot / fig_h
+    ax_map = fig.add_axes([map_cfg['left'], row_bottom, map_frac, row_h_in / fig_h])
+    ax_cb = fig.add_axes([map_cfg['left'] + map_frac + gap, row_bottom,
+                          hist_frac, row_h_in / fig_h])
+
+    plt_map(det_map, nside, seen_idx, label=None, ax=ax_map,
+            ra_range=(ra_lo, ra_hi), dec_range=(dec_lo, dec_hi),
+            cbar_ax=None, vmin=vmin, vmax=vmax,
+            fig_width_in=map_width_in * map_frac)
+    _colorbar_histogram(ax_cb, data, label, vmin=vmin, vmax=vmax)
+
+    plt.savefig(output_path, dpi=map_cfg['dpi'], bbox_inches='tight')
+    plt.close(fig)
+
+
+def plot_full_sample_nz(results, output_dir, filename='full_sample_nz.png'):
+    """Plot per-pixel n(z) curves for the full sample plus global n(z)."""
+    if 'full' not in results:
+        raise KeyError("results must contain a 'full' entry.")
+
+    cfg = PLOT_CFG['nz']
+    stats = results['full']
+    z = np.asarray(stats['z'])
+    dndzs = np.asarray(stats['dndzs'])
+    dndz_det = np.asarray(stats['dndz_det'])
+
+    fig, ax = plt.subplots(figsize=cfg['full_figsize'], facecolor='white')
+    ax.set_facecolor('white')
+    ax.grid(False)
+
+    n_pixels = dndzs.shape[0]
+    n_plot = min(n_pixels, 200)
+    step = max(1, n_pixels // n_plot)
+    for j in range(0, n_pixels, step):
+        ax.plot(z, dndzs[j], color='gray', alpha=0.16, lw=cfg['pix_lw'])
+
+    ax.plot(z, dndz_det, color='black', lw=cfg['main_lw'], label='Full sample')
+
+    ax.set_xlim(0, 2.0)
+    ax.set_xlabel('Redshift $z$', fontsize=cfg['label_fontsize'])
+    ax.set_ylabel('$n(z)$', fontsize=cfg['label_fontsize'])
+    ax.set_title('Full Sample Redshift Distribution', fontsize=cfg['title_fontsize'])
+    ax.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+    ax.legend(loc='upper right', fontsize=cfg['legend_fontsize'])
+
+    plt.savefig(os.path.join(output_dir, filename), dpi=cfg['dpi'], facecolor='white')
+    plt.close(fig)
+
+
+def _plot_single_bin_wcomp(ax_top, ax_bot, res, key, show_legend=False, cfg=None):
+    if cfg is None:
+        cfg = PLOT_CFG['clustering']
+    theta_arcmin = res.theta_deg * 60.0
+
+    ax_top.plot(theta_arcmin, theta_arcmin * res.w_model, 'k--', lw=cfg['w_model_lw'], label=r'$\bar n(z)$')
+    ax_top.plot(theta_arcmin, theta_arcmin * res.w_true, 'r-', lw=cfg['w_true_lw'], label=r'$n(z,\theta)$')
+    ax_top.set_xscale('log')
+    ax_top.set_title(f'Bin: {key}', pad=cfg['title_pad'], fontsize=cfg['title_fontsize'])
+    ax_top.set_ylabel(r'$\theta\cdot w(\theta)$ [arcmin]', labelpad=8, fontsize=cfg['label_fontsize'])
+    ax_top.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+    plt.setp(ax_top.get_xticklabels(), visible=False)
+    if show_legend:
+        ax_top.legend(loc='upper right', fontsize=cfg['legend_fontsize'])
+
+    ratio = np.full_like(res.w_model, np.nan, dtype=float)
+    mask = np.isfinite(res.w_model) & (np.abs(res.w_model) > 1e-12)
+    ratio[mask] = res.w_true[mask] / res.w_model[mask]
+
+    ax_bot.plot(theta_arcmin, ratio, 'b-', lw=cfg['ratio_lw'])
+    ax_bot.set_ylim(0.98, 1.12)
+    ax_bot.set_xscale('log')
+    ax_bot.set_ylabel(r'$w_{\rm true}/w_{\rm model}$', labelpad=8, fontsize=cfg['label_fontsize'])
+    ax_bot.set_xlabel(r'$\theta$ [arcmin]', fontsize=cfg['label_fontsize'], labelpad=4)
+    ax_bot.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+
+
+def plot_w_comparison_full_and_tomo(all_results, output_dir):
+    cfg = PLOT_CFG['clustering']
+
+    if 'full' in all_results:
+        fig = plt.figure(figsize=cfg['full_figsize'], constrained_layout=True)
+        gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.06)
+        ax_top = fig.add_subplot(gs[0])
+        ax_bot = fig.add_subplot(gs[1], sharex=ax_top)
+        _plot_single_bin_wcomp(ax_top, ax_bot, all_results['full'], 'full', show_legend=True, cfg=cfg)
+        fig.savefig(os.path.join(output_dir, 'w_comparison_full.png'), dpi=cfg['save_dpi'])
+        plt.close(fig)
+
+    tomo_keys = sorted([k for k in all_results if k.startswith('tomo_')], key=lambda x: int(x.split('_')[1]))
+    if not tomo_keys:
+        return
+
+    n = len(tomo_keys)
+    n_cols = 3
+    n_rows = (n + n_cols - 1) // n_cols
+
+    fig = plt.figure(figsize=cfg['tomo_figsize'], constrained_layout=True)
+    outer = fig.add_gridspec(n_rows, n_cols, wspace=cfg['outer_wspace'], hspace=cfg['outer_hspace'])
+
+    for i, key in enumerate(tomo_keys):
+        r, c = divmod(i, n_cols)
+        sub = outer[r, c].subgridspec(2, 1, height_ratios=[3, 1], hspace=cfg['inner_hspace'])
+        ax_top = fig.add_subplot(sub[0])
+        ax_bot = fig.add_subplot(sub[1], sharex=ax_top)
+        _plot_single_bin_wcomp(ax_top, ax_bot, all_results[key], key, show_legend=(i == 0), cfg=cfg)
+
+    for j in range(n, n_rows * n_cols):
+        r, c = divmod(j, n_cols)
+        ax = fig.add_subplot(outer[r, c])
+        ax.axis('off')
+
+    fig.savefig(os.path.join(output_dir, 'w_comparison_tomo.png'), dpi=cfg['save_dpi'])
+    plt.close(fig)
+
+
+def _plot_delta_w_one_bin(ax_top, ax_bot, res, key, show_legend=False, cfg=None):
+    if cfg is None:
+        cfg = PLOT_CFG['clustering']
+
+    theta_arcmin = 60.0 * res.theta_deg
+
+    ax_top.plot(theta_arcmin, res.delta_w, 'k-', lw=cfg['delta_tot_lw'], label=r'$\delta w$ (Tot)')
+    ax_top.plot(theta_arcmin, res.delta_w_1, 'r--', lw=cfg['delta_term_lw'], label=r'$\delta w_1$ (Shift)')
+    ax_top.plot(theta_arcmin, res.delta_w_2, 'b:', lw=cfg['delta_term_lw'], label=r'$\delta w_2$ (Clust)')
+    ax_top.axhline(0.0, color='gray', lw=1.0, alpha=0.6)
+    ax_top.set_xscale('log')
+    ax_top.set_yscale('symlog', linthresh=1e-8)
+    ax_top.set_title(f'Bin: {key}', pad=cfg['title_pad'], fontsize=cfg['title_fontsize'])
+    ax_top.set_ylabel(r'$\delta w(\theta)$', fontsize=cfg['label_fontsize'])
+    ax_top.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+    plt.setp(ax_top.get_xticklabels(), visible=False)
+    if show_legend:
+        ax_top.legend(loc='best', fontsize=cfg['legend_fontsize'])
+
+    denom = np.where(np.abs(res.delta_w) > 1e-14, res.delta_w, np.nan)
+    frac1 = res.delta_w_1 / denom
+    frac2 = res.delta_w_2 / denom
+
+    ax_bot.plot(theta_arcmin, frac1, color='r', lw=cfg['ratio_lw'], label=r'$\delta w_1/\delta w$')
+    ax_bot.plot(theta_arcmin, frac2, color='b', lw=cfg['ratio_lw'], label=r'$\delta w_2/\delta w$')
+    ax_bot.axhline(0.0, color='gray', lw=1.0, alpha=0.6)
+    ax_bot.set_xscale('log')
+    ax_bot.set_ylabel('Fraction', fontsize=cfg['label_fontsize'])
+    ax_bot.set_xlabel(r'$\theta$ [arcmin]', fontsize=cfg['label_fontsize'])
+    ax_bot.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+
+
+def plot_delta_w_components_split(all_results, output_dir):
+    """Save full and tomo delta-w decomposition figures in 2-row panel format."""
+    cfg = PLOT_CFG['clustering']
+
+    if 'full' in all_results:
+        fig = plt.figure(figsize=cfg['full_figsize'], constrained_layout=True)
+        gs = fig.add_gridspec(2, 1, height_ratios=[3, 1], hspace=0.08)
+        ax_top = fig.add_subplot(gs[0])
+        ax_bot = fig.add_subplot(gs[1], sharex=ax_top)
+        _plot_delta_w_one_bin(ax_top, ax_bot, all_results['full'], 'full', show_legend=True, cfg=cfg)
+        fig.savefig(os.path.join(output_dir, 'delta_w_components_full.png'), dpi=cfg['save_dpi'])
+        plt.close(fig)
+
+    tomo_keys = sorted([k for k in all_results if k.startswith('tomo_')], key=lambda x: int(x.split('_')[1]))
+    if not tomo_keys:
+        return
+
+    n = len(tomo_keys)
+    n_cols = 3
+    n_rows = (n + n_cols - 1) // n_cols
+
+    fig = plt.figure(figsize=cfg['tomo_figsize'], constrained_layout=True)
+    outer = fig.add_gridspec(n_rows, n_cols, wspace=cfg['outer_wspace'], hspace=cfg['outer_hspace'])
+
+    for i, key in enumerate(tomo_keys):
+        r, c = divmod(i, n_cols)
+        sub = outer[r, c].subgridspec(2, 1, height_ratios=[3, 1], hspace=cfg['inner_hspace'])
+        ax_top = fig.add_subplot(sub[0])
+        ax_bot = fig.add_subplot(sub[1], sharex=ax_top)
+        _plot_delta_w_one_bin(ax_top, ax_bot, all_results[key], key, show_legend=(i == 0), cfg=cfg)
+
+    for j in range(n, n_rows * n_cols):
+        r, c = divmod(j, n_cols)
+        ax = fig.add_subplot(outer[r, c])
+        ax.axis('off')
+
+    fig.savefig(os.path.join(output_dir, 'delta_w_components_tomo.png'), dpi=cfg['save_dpi'])
+    plt.close(fig)
 
 def plot_systematics_vs_metrics(sys_maps, sys_labels, metrics, metric_labels, seen_idx, output_dir, prefix="sys_vs"):
     """Plot per-pixel systematics vs summary metrics with binned trends."""
@@ -1050,7 +1312,7 @@ def plot_wtheta_comparison(wtheta_results, w_theory=None, save_path=None):
     ----------
     wtheta_results : dict
         Output of density_variation.measure_wtheta() containing
-        theta, w_ur, w_or, w_orig and their covariances.
+        theta, w_ur, w_or and their covariances.
     w_theory : array, optional
         Theoretical w(theta) prediction.
     save_path : str, optional
@@ -1060,17 +1322,10 @@ def plot_wtheta_comparison(wtheta_results, w_theory=None, save_path=None):
 
     plt.figure(figsize=(8, 6))
 
-    # No selection (baseline)
-    cov_orig = wtheta_results['cov_orig']
-    err_orig = theta * np.sqrt(np.diag(cov_orig))
-    plt.errorbar(theta, theta * wtheta_results['w_orig'],
-                 yerr=err_orig, fmt='.', label='No selection',
-                 capsize=2, ms=5)
-
     # Uniform randoms (contains selection bias)
     cov_ur = wtheta_results['cov_ur']
     err_ur = theta * np.sqrt(np.diag(cov_ur))
-    plt.errorbar(theta * 1.02, theta * wtheta_results['w_ur'],
+    plt.errorbar(theta, theta * wtheta_results['w_ur'],
                  yerr=err_ur, fmt='.', label='Uniform randoms',
                  capsize=2, ms=5)
 
@@ -1087,6 +1342,7 @@ def plot_wtheta_comparison(wtheta_results, w_theory=None, save_path=None):
                  label='Theory (b=1)')
 
     plt.xscale('log')
+    plt.yscale('linear')
     plt.xlabel(r"$\theta$ [arcmin]")
     plt.ylabel(r"$\theta \cdot w(\theta)$")
     plt.title("Angular Correlation: Density Variation")
@@ -1099,34 +1355,43 @@ def plot_wtheta_comparison(wtheta_results, w_theory=None, save_path=None):
         logger.info("w(theta) comparison plot saved to %s", save_path)
     plt.close()
 
-def plot_delta_w_components(result, output_dir, filename="delta_w_components.png"):
-    """Plot comparison of delta_w components (total, term1, term2)."""
+def plot_delta_w_components(result_or_results, output_dir, filename='delta_w_components.png'):
+    """Backward-compatible delta-w plotter.
+
+    If ``result_or_results`` is a dict (keys like ``full``, ``tomo_0``), generate
+    split full/tomo figures via :func:`plot_delta_w_components_split`.
+    Otherwise, plot a single-bin decomposition to ``filename``.
+    """
+    if isinstance(result_or_results, dict):
+        plot_delta_w_components_split(result_or_results, output_dir)
+        return
+
+    result = result_or_results
     theta_arcmin = 60.0 * result.theta_deg
-    plt.figure(figsize=(8, 6))
-    
-    # delta_w can be small or negative, use symlog for better visibility
-    plt.plot(theta_arcmin, result.delta_w, "k-", lw=2.5, label=r"$\delta w$ (Total)")
-    plt.plot(theta_arcmin, result.delta_w_1, "r--", lw=2, label=r"$\delta w_1$ (Variation of mean density)")
-    plt.plot(theta_arcmin, result.delta_w_2, "b:", lw=2, label=r"$\delta w_2$ (Angular cross-correlation)")
-    
+    cfg = PLOT_CFG['clustering']
+
+    plt.figure(figsize=cfg['full_figsize'])
+    plt.plot(theta_arcmin, result.delta_w, 'k-', lw=cfg['delta_tot_lw'], label=r'$\delta w$ (Total)')
+    plt.plot(theta_arcmin, result.delta_w_1, 'r--', lw=cfg['delta_term_lw'], label=r'$\delta w_1$ (Variation of mean density)')
+    plt.plot(theta_arcmin, result.delta_w_2, 'b:', lw=cfg['delta_term_lw'], label=r'$\delta w_2$ (Angular cross-correlation)')
     plt.axhline(0, color='gray', lw=1, ls='-', alpha=0.5)
-    
-    plt.xlabel(r"$\theta$ [arcmin]")
-    plt.ylabel(r"$\delta w(\theta)$")
-    plt.xscale("log")
-    
-    # Adaptive threshold for symlog
+
+    plt.xlabel(r'$	heta$ [arcmin]', fontsize=cfg['label_fontsize'])
+    plt.ylabel(r'$\delta w(	heta)$', fontsize=cfg['label_fontsize'])
+    plt.xscale('log')
+    plt.tick_params(axis='both', labelsize=cfg['tick_fontsize'])
+
     all_vals = np.concatenate([result.delta_w, result.delta_w_1, result.delta_w_2])
     abs_vals = np.abs(all_vals[all_vals != 0])
     if len(abs_vals) > 0:
         linthresh = np.percentile(abs_vals, 10)
-        plt.yscale("symlog", linthresh=max(linthresh, 1e-9))
-    
-    plt.grid(True, alpha=0.3, which="both")
-    plt.legend()
-    plt.title(r"Decomposition of Clustering Enhancement $\delta w$")
+        plt.yscale('symlog', linthresh=max(linthresh, 1e-9))
+
+    plt.grid(True, alpha=0.3, which='both')
+    plt.legend(fontsize=cfg['legend_fontsize'])
+    plt.title(r'Decomposition of Clustering Enhancement $\delta w$', fontsize=cfg['title_fontsize'])
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, filename))
+    plt.savefig(os.path.join(output_dir, filename), dpi=cfg['save_dpi'])
     plt.close()
 
 def plot_all_delta_w_components(all_results, output_dir, filename="delta_w_components_all.png"):
@@ -1134,7 +1399,8 @@ def plot_all_delta_w_components(all_results, output_dir, filename="delta_w_compo
     n_bins = len(all_results)
     keys = list(all_results.keys())
     
-    fig, axes = plt.subplots(1, n_bins, figsize=(6 * n_bins, 5), squeeze=False)
+    cfg = PLOT_CFG['clustering']
+    fig, axes = plt.subplots(1, n_bins, figsize=(cfg['tomo_figsize'][0], cfg['full_figsize'][1]), squeeze=False)
     
     for i, key in enumerate(keys):
         res = all_results[key]
@@ -1164,5 +1430,5 @@ def plot_all_delta_w_components(all_results, output_dir, filename="delta_w_compo
             
     plt.suptitle(r"Decomposition of Clustering Enhancement $\delta w$ Across Bins", fontsize=14)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig(os.path.join(output_dir, filename), dpi=200)
+    plt.savefig(os.path.join(output_dir, filename), dpi=PLOT_CFG['clustering']['save_dpi'])
     plt.close()
