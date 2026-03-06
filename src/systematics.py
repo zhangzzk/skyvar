@@ -89,9 +89,25 @@ def build_tiles_from_footprint(ra_range, dec_range, size_deg):
     tiles = Tiles(start_lon, start_lat, size_deg, size_deg, nlon, nlat)
     return tiles, (ra_min, ra_max, dec_lo, dec_hi)
 
+
+def assign_pixels_to_tiles(tiles, ra, dec, ra_min, ra_max, dec_lo, dec_hi):
+    """Assign each HEALPix patch to a tile inside the exact footprint."""
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+    tile_inds = np.full(ra.shape, -1, dtype=int)
+
+    inside = in_ra_range(ra, ra_min, ra_max) & (dec >= dec_lo) & (dec <= dec_hi)
+    if np.any(inside):
+        tile_inds[inside] = tiles.get_tileind_fast(ra[inside], dec[inside])
+
+    mask = tile_inds != -1
+    return tile_inds, mask
+
 class Tiles:
     """Represent a regular grid of sky tiles."""
     def __init__(self, start_lon, start_lat, dx, dy, nlon, nlat):
+        self.nlon = int(nlon)
+        self.nlat = int(nlat)
         self.n_tiles = nlon * nlat
         lonind = np.arange(nlon)
         latind = np.arange(nlat)
@@ -108,29 +124,50 @@ class Tiles:
         self.corner_lat_s = self.tile_centers.T[1]-dy/2
         self.dlats = self.corner_lat_n - self.corner_lat_s
         self.dlons = lon_diff(self.corner_lon_e, self.corner_lon_w)
+
+        # Cache one set of longitude bounds per Dec row for O(n_points * nlat) lookup.
+        row0 = np.arange(0, self.n_tiles, self.nlon)
+        self._row_lon_w = (self.tile_centers[row0, 0] - self.dlons[row0] / 2 + 360.0) % 360.0
+        self._row_lat_s = self.corner_lat_s[row0]
+        self._row_lat_n = self.corner_lat_n[row0]
+        self._row_dlon = self.dlons[row0]
         
     def get_tileind_fast(self, lon, lat):
-        """Vectorized lookup of tile indices for input sky positions."""
-        lon = np.asarray(lon)
-        lat = np.asarray(lat)
+        """Fast wrap-safe lookup of tile indices for input sky positions."""
+        lon = np.asarray(lon, dtype=float)
+        lat = np.asarray(lat, dtype=float)
+        if lon.shape != lat.shape:
+            raise ValueError(f"lon and lat must have same shape, got {lon.shape} vs {lat.shape}")
+
         tile_inds = np.full(lon.shape, -1, dtype=int)
+        if lon.size == 0:
+            return tile_inds
 
-        lon_min = (self.tile_centers[:, 0] - self.dlons / 2 + 360) % 360
-        lon_max = (self.tile_centers[:, 0] + self.dlons / 2 + 360) % 360
-        lat_min = self.tile_centers[:, 1] - self.dlats / 2
-        lat_max = self.tile_centers[:, 1] + self.dlats / 2
+        lon = (lon + 360.0) % 360.0
+        eps = 1e-12
 
-        lon = (lon + 360) % 360
+        for row in range(self.nlat):
+            in_lat = (lat >= self._row_lat_s[row]) & (lat <= self._row_lat_n[row]) & (tile_inds == -1)
+            if not np.any(in_lat):
+                continue
 
-        for i, (lmin, lmax, bmin, bmax) in tqdm(enumerate(zip(lon_min, lon_max, lat_min, lat_max))):
-            in_lon = (lon >= lmin) & (lon <= lmax) if lmin <= lmax else ((lon >= lmin) | (lon <= lmax))
-            in_lat = (lat >= bmin) & (lat <= bmax)
-            mask = in_lon & in_lat & (tile_inds == -1)
-            tile_inds[mask] = i
+            idx = np.where(in_lat)[0]
+            dlon = self._row_dlon[row]
+            if dlon <= 0:
+                continue
+
+            lon_rel = ((lon[idx] - self._row_lon_w[row] + 360.0) % 360.0)
+            ilon = np.floor(np.maximum(lon_rel - eps * dlon, 0.0) / dlon).astype(int)
+            valid = (ilon >= 0) & (ilon < self.nlon)
+            if not np.any(valid):
+                continue
+
+            tile_inds[idx[valid]] = row * self.nlon + ilon[valid]
 
         return tile_inds
 
     def get_tileind_regular(self, lon, lat):
+        """Legacy helper for strictly regular lon grids."""
         lon = (np.asarray(lon) + 360) % 360
         lat = np.asarray(lat)
 
@@ -267,10 +304,9 @@ def main():
         (RA_MIN, RA_MAX), (DEC_MIN, DEC_MAX), dx
     )
     
-    pix_tileind = test_tiles.get_tileind_regular(ra_pix, dec_pix)
-    exact_footprint = in_ra_range(ra_pix, ra_min_n, ra_max_n) & (dec_pix >= dec_lo_n) & (dec_pix <= dec_hi_n)
-    pix_tileind[~exact_footprint] = -1
-    mask_footprint = pix_tileind != -1
+    pix_tileind, mask_footprint = assign_pixels_to_tiles(
+        test_tiles, ra_pix, dec_pix, ra_min_n, ra_max_n, dec_lo_n, dec_hi_n
+    )
 
     # Build systematics models.
     sys_noise = NoiseSystematic(test_tiles, config.SYSTEMATICS_CONFIG['noise'])

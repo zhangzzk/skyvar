@@ -14,12 +14,14 @@ try:
     from . import config
     from . import clustering
     from . import selection
+    from . import systematics
     from . import plotting
     from . import utils
 except ImportError:
     import config
     import clustering
     import selection
+    import systematics
     import plotting
     import utils
 
@@ -37,6 +39,13 @@ SYS_NSIDE = int(SIM_CFG["sys_nside_stats"])
 # Module-level cache for the measured n(z), populated by main() before
 # _build_nz_for_glass is called with nz_source='measured'.
 _MEASURED_NZ_CACHE: dict = {}
+
+
+def _normalize_selection_mode(mode):
+    if mode is None:
+        return None
+    mode = str(mode).strip().lower()
+    return None if mode in ("", "none") else mode
 
 
 @dataclass(frozen=True)
@@ -210,33 +219,47 @@ def build_mean_p_map(df: pd.DataFrame) -> np.ndarray:
     Numerator : sum(detection) per stats-pixel.
     Denominator: total simulated galaxies per stats-pixel (geometric).
     """
-    # Map to stats grid.
     nside_sim = int(SIM_CFG["sys_nside_sim"])
-    mock_sys_map_path = utils.get_output_path("mock_sys_map")
-    psf_hp_map = hp.read_map(mock_sys_map_path, field=0)
-    npix = psf_hp_map.size
+    npix = hp.nside2npix(SYS_NSIDE)
     mean_p = np.full(npix, hp.UNSEEN)
 
     _, seen_idx_stats, seen_idx_sim = selection.load_system_maps(return_sim_idx=True)
+    pix_idx = df["pix_idx_input_p"].to_numpy(dtype=np.int64)
+    det = df["detection"].to_numpy(dtype=float)
 
-    pix_idx_stats = selection.map_pix_sim_to_stats(
-        df["pix_idx_input_p"].to_numpy(),
-        nside_sim=nside_sim,
-        nside_stats=SYS_NSIDE,
-    )
-
-    # Numerator: detection-weighted count per stats-pixel.
-    num = np.bincount(pix_idx_stats, weights=df["detection"].to_numpy(), minlength=npix)
-
-    # Denominator: total simulated galaxies per stats-pixel (geometric).
     n_pop_sample = int(SIM_CFG["n_pop_sample"])
     den = selection.get_input_counts_per_stats_pixel(
         seen_idx_sim, nside_sim=nside_sim,
         nside_stats=SYS_NSIDE, n_pop_sample=n_pop_sample,
     ).astype(float)
 
-    frac_pix = np.divide(num, den, out=np.zeros(npix, dtype=float), where=den > 0)
-    mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
+    # Support the three conventions seen in practice:
+    # 1. local seen-pixel ids (notebook)
+    # 2. global stats-pixel ids
+    # 3. global simulation-pixel ids (selection.py raw preds)
+    if pix_idx.size > 0 and pix_idx.max() < len(seen_idx_stats):
+        num_seen = np.bincount(pix_idx, weights=det, minlength=len(seen_idx_stats))
+        den_seen = den[seen_idx_stats]
+        frac_seen = np.divide(
+            num_seen,
+            den_seen,
+            out=np.zeros(len(seen_idx_stats), dtype=float),
+            where=den_seen > 0,
+        )
+        mean_p[seen_idx_stats] = frac_seen
+    elif pix_idx.size > 0 and pix_idx.max() < npix:
+        num = np.bincount(pix_idx, weights=det, minlength=npix)
+        frac_pix = np.divide(num, den, out=np.zeros(npix, dtype=float), where=den > 0)
+        mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
+    else:
+        pix_idx_stats = selection.map_pix_sim_to_stats(
+            pix_idx,
+            nside_sim=nside_sim,
+            nside_stats=SYS_NSIDE,
+        )
+        num = np.bincount(pix_idx_stats, weights=det, minlength=npix)
+        frac_pix = np.divide(num, den, out=np.zeros(npix, dtype=float), where=den > 0)
+        mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
 
     if bool(MOCK_CFG.get("normalize_detection_by_max", True)):
         vmax = np.max(mean_p[seen_idx_stats]) if len(seen_idx_stats) > 0 else 0.0
@@ -277,22 +300,17 @@ def apply_tile_filter(
     lat_rand: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Keep only sources inside valid tiles."""
-    gm = _load_generate_mocksys()
-
     fp = config.SYSTEMATICS_CONFIG["footprint"]
     size_deg = float(config.SYSTEMATICS_CONFIG["tiles"]["size_deg"])
-    start_lon = float(fp["ra_range"][0])
-    start_lat = float(fp["dec_range"][0])
-    nlon = int(round((float(fp["ra_range"][1]) - start_lon) / size_deg))
-    nlat = int(round((float(fp["dec_range"][1]) - start_lat) / size_deg))
+    tiles, (ra_min, ra_max, dec_lo, dec_hi) = systematics.build_tiles_from_footprint(
+        fp["ra_range"], fp["dec_range"], size_deg
+    )
 
-    tiles = gm.tiles(start_lon, start_lat, size_deg, size_deg, nlon, nlat)
+    tileind = tiles.get_tileind_fast(lon, lat)
+    tileind_rand = tiles.get_tileind_fast(lon_rand, lat_rand)
 
-    tileind = tiles.get_tileind_regular(lon, lat)
-    tileind_rand = tiles.get_tileind_regular(lon_rand, lat_rand)
-
-    keep = tileind != -1
-    keep_rand = tileind_rand != -1
+    keep = (tileind != -1) & systematics.in_ra_range(lon, ra_min, ra_max) & (lat >= dec_lo) & (lat <= dec_hi)
+    keep_rand = (tileind_rand != -1) & systematics.in_ra_range(lon_rand, ra_min, ra_max) & (lat_rand >= dec_lo) & (lat_rand <= dec_hi)
 
     return lon[keep], lat[keep], lon_rand[keep_rand], lat_rand[keep_rand]
 
@@ -476,8 +494,7 @@ def main() -> None:
 
     # 0. Load predictions once, apply selection once.
     df_raw = load_predictions()
-    sel_mode = str(MOCK_CFG.get("selection_mode", "snr")).strip().lower()
-    sel_mode = None if sel_mode in ("", "none") else sel_mode
+    sel_mode = _normalize_selection_mode(ANA_CFG.get("selection_mode", None))
     df = selection.apply_galaxy_selection(df_raw, mode=sel_mode)
     del df_raw
     logger.info("Selected %d galaxies (mode=%s)", len(df), sel_mode)

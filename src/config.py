@@ -49,7 +49,7 @@ SIM_SETTINGS = {
 TILE_SIZE = 1.0
 SYSTEMATICS_CONFIG = {
     'footprint': {
-        'ra_range': [155, 233],        # [deg]
+        'ra_range': [150, 220],        # [deg]
         'dec_range': [-9, 9],          # [deg]
     },
     'tiles': {
@@ -58,15 +58,15 @@ SYSTEMATICS_CONFIG = {
     'noise': {
         'mu0': 6.0,                    # Global mean pixel noise.
         'sigma_corr': 0.3,            # Correlated large-scale scatter.
-        'l_corr': 6.0,                # Correlation length [deg].
-        'sigma_uncorr': 0.6,          # Uncorrelated tile-to-tile scatter.
+        'l_corr': 4.0,                # Correlation length [deg].
+        'sigma_uncorr': 0.5,          # Uncorrelated tile-to-tile scatter.
         'sigma_pix': 0.1,             # Small pixel-level jitter.
     },
     'psf': {
-        'mu0': 0.7,                    # Global baseline (median seeing) [arcsec].
-        'sigma_corr': 0.03,           # Correlated large-scale scatter.
-        'l_corr': 6.0,                # Correlation length [deg].
-        'sigma_uncorr': 0.08,         # Uncorrelated tile-to-tile scatter.
+        'mu0': 0.65,                    # Global baseline (median seeing) [arcsec].
+        'sigma_corr': 0.0,           # Correlated large-scale scatter.
+        'l_corr': 4.0,                # Correlation length [deg].
+        'sigma_uncorr': 0.07,         # Uncorrelated tile-to-tile scatter.
         'intra_scale': TILE_SIZE,     # Intra-tile Gaussian bump scale [deg].
         'sigma_pix': 0.01,            # Small pixel-level noise.
     },
@@ -117,7 +117,6 @@ PHOTOZ_PARAMS = {
     'alpha': 0.4,                # Magnitude-scaling exponent.
     'm_ref': 21,                 # Reference magnitude.
     'rms_ref': 6.0,              # Reference noise level.
-    'pixel_rms_ref': 6.0,        # Alias used by plotting.py.
     'psf_fwhm_ref': 0.7,         # Reference PSF seeing [arcsec].
 
     # --- MagLim selection (mode='maglim') ---
@@ -213,12 +212,12 @@ DENSITY_SETTINGS = {
 
         # Toy Gaussian n(z) parameters (only used when nz_source='toy').
         'gaussian_mean': 0.6,
-        'gaussian_sigma': 0.23,
+        'gaussian_sigma': 0.25,
 
         # GLASS grid & population.
         'glass_nside': 1024,
         'glass_z_nbins': 201,          # z-grid points for GLASS (finer than z_bins).
-        'n_arcmin2': 5.0,              # Galaxy density for mock catalog.
+        'n_arcmin2': 10.0,              # Galaxy density for mock catalog.
         'bias': 1.0,                   # Galaxy bias (also used for theory curve).
 
         # Detection map post-processing.
@@ -240,6 +239,6 @@ DENSITY_SETTINGS = {
 
     # --- Caching ---
     'cache': {
-        'reuse_mock_catalogs': True,   # False = regenerate even if files exist.
+        'reuse_mock_catalogs': False,   # False = regenerate even if files exist.
     },
 }

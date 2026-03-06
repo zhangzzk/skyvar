@@ -344,6 +344,43 @@ def plot_all_comparisons(all_results, geometric_factors, output_dir):
     plt.savefig(save_path)
     plt.close()
 
+def _project_ra_range(ra_range):
+    """Project an RA interval to a contiguous plotting interval."""
+    if ra_range is None:
+        return None, None, None
+
+    ra0_raw = float(ra_range[0])
+    ra1_raw = float(ra_range[1])
+    ra0 = ra0_raw % 360.0
+    ra1 = ra1_raw % 360.0
+    ra_span = (ra1 - ra0) % 360.0
+    if np.isclose(ra_span, 0.0):
+        ra_span = 360.0
+    wraps = (ra0 > ra1) and (ra_span < 360.0)
+
+    target_mid = 0.5 * (ra0_raw + ra1_raw)
+    wrapped_mid = ra0 + 0.5 * ra_span
+    k = int(np.round((target_mid - wrapped_mid) / 360.0))
+    ra_lo = ra0 + 360.0 * k
+    ra_hi = ra_lo + ra_span
+    if wraps and ra_lo > 180.0:
+        ra_lo -= 360.0
+        ra_hi -= 360.0
+    return ra_lo, ra_hi, ra_span
+
+
+def _project_ra_values(lon, ra_range):
+    """Project lon values into the same contiguous coordinates as _project_ra_range."""
+    if ra_range is None:
+        return np.asarray(lon)
+
+    ra_lo, _, _ = _project_ra_range(ra_range)
+    ra0 = float(ra_range[0]) % 360.0
+    lon = np.asarray(lon) % 360.0
+    lon_proj = ((lon - ra0 + 360.0) % 360.0) + ra0
+    return lon_proj + (ra_lo - ra0)
+
+
 def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
             ax=None, ra_range=None, dec_range=None, cbar_ax=None,
             vmin=None, vmax=None, fig_width_in=None):
@@ -364,18 +401,22 @@ def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
     else:
         show_plot = False
 
+    lon_plot = _project_ra_values(lon, ra_range)
     pix_res_deg = np.degrees(hp.nside2resol(sys_nside))
     if ra_range is not None:
-        ra_span = max(ra_range) - min(ra_range)
+        ra_lo, ra_hi, ra_span = _project_ra_range(ra_range)
     else:
-        ra_span = lon[mask].max() - lon[mask].min() + 2
+        ra_lo = lon_plot[mask].min() - 1.0
+        ra_hi = lon_plot[mask].max() + 1.0
+        ra_span = ra_hi - ra_lo
+    ra_span = max(float(ra_span), 1e-6)
     if fig_width_in is None:
         fig_width_in = ax.get_figure().get_figwidth()
 
     marker_pts = pix_res_deg / ra_span * fig_width_in * 72
     s = marker_pts ** 2 * 2
 
-    sc = ax.scatter(lon[mask], lat[mask], c=map_data[mask], s=s,
+    sc = ax.scatter(lon_plot[mask], lat[mask], c=map_data[mask], s=s,
                     cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none',
                     marker='s', rasterized=True)
 
@@ -392,10 +433,7 @@ def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
     ax.set_ylabel('Dec [deg]', fontsize=PLOT_CFG['map']['label_fontsize'])
     ax.tick_params(axis='both', labelsize=PLOT_CFG['map']['tick_fontsize'])
 
-    if ra_range is not None:
-        ax.set_xlim(max(ra_range), min(ra_range))
-    else:
-        ax.set_xlim(lon[mask].max() + 1, lon[mask].min() - 1)
+    ax.set_xlim(ra_hi, ra_lo)
     if dec_range is not None:
         ax.set_ylim(min(dec_range), max(dec_range))
     else:
@@ -771,8 +809,9 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
     lon, lat = hp.pix2ang(nside, np.arange(n_pix), lonlat=True)
     if ra_range is None:
         ra_lo, ra_hi = lon[mask].min(), lon[mask].max()
+        ra_span = max(float(ra_hi - ra_lo), 1e-6)
     else:
-        ra_lo, ra_hi = min(ra_range), max(ra_range)
+        ra_lo, ra_hi, ra_span = _project_ra_range(ra_range)
     if dec_range is None:
         dec_lo, dec_hi = lat[mask].min(), lat[mask].max()
     else:
@@ -785,7 +824,7 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
     map_frac = map_cfg['map_frac']
     hist_frac = map_cfg['hist_frac']
     gap = map_cfg['gap']
-    row_aspect = (dec_hi - dec_lo) / (ra_hi - ra_lo)
+    row_aspect = (dec_hi - dec_lo) / ra_span
 
     map_width_in = map_cfg['width_in']
     row_h_in = map_width_in * map_frac * row_aspect
@@ -836,8 +875,9 @@ def plot_detection_rate_overview(frac_pix, seen_idx, nside, output_path,
     lon, lat = hp.pix2ang(nside, np.arange(npix), lonlat=True)
     if ra_range is None:
         ra_lo, ra_hi = lon[seen_idx].min(), lon[seen_idx].max()
+        ra_span = max(float(ra_hi - ra_lo), 1e-6)
     else:
-        ra_lo, ra_hi = min(ra_range), max(ra_range)
+        ra_lo, ra_hi, ra_span = _project_ra_range(ra_range)
     if dec_range is None:
         dec_lo, dec_hi = lat[seen_idx].min(), lat[seen_idx].max()
     else:
@@ -853,7 +893,7 @@ def plot_detection_rate_overview(frac_pix, seen_idx, nside, output_path,
     map_frac = map_cfg['map_frac']
     hist_frac = map_cfg['hist_frac']
     gap = map_cfg['gap']
-    row_aspect = (dec_hi - dec_lo) / (ra_hi - ra_lo)
+    row_aspect = (dec_hi - dec_lo) / ra_span
 
     map_width_in = map_cfg['width_in']
     row_h_in = map_width_in * map_frac * row_aspect
@@ -1144,7 +1184,7 @@ def plot_dm_c_comparison_objects(cla_cat, output_dir):
     rms = cla_cat['pixel_rms_input_p']
     psf = cla_cat['psf_fwhm_input_p']
     
-    ref_rms = config.PHOTOZ_PARAMS['pixel_rms_ref']
+    ref_rms = config.PHOTOZ_PARAMS['rms_ref']
     ref_psf = config.PHOTOZ_PARAMS['psf_fwhm_ref']
     
     # Formula 1 calculation
