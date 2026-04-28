@@ -30,6 +30,8 @@ def get_output_path(kind, bin_idx=None):
         return os.path.join(config.PATHS['data_dir'], f"mock_sys_map_{run_tag_map}.fits")
     if kind == "output_preds":
         return os.path.join(config.PATHS['sys_preds_dir'], f"mock_sys_preds_{run_tag_pred}.feather")
+    if kind == "pred_chunks":
+        return os.path.join(config.PATHS['sys_preds_dir'], f"pred_chunks_{run_tag_pred}")
     if kind == "w_theta_fits":
         return os.path.join(config.PATHS['sys_preds_dir'], f"w_theta_{run_tag}.fits")
     if kind == "nz_bin_fits":
@@ -46,7 +48,7 @@ def normalize_profile(z, values, axis=-1):
     """
     arr = np.asarray(values, dtype=float)
     z = np.asarray(z, dtype=float)
-    norm = np.trapezoid(arr, z, axis=axis)
+    norm = np.trapz(arr, z, axis=axis)
 
     if arr.ndim == 1:
         return arr / norm if norm > 0 else np.zeros_like(arr)
@@ -64,8 +66,8 @@ def calculate_geometric_stats(z, dndzs, dndz_glob, frac_pix=None):
         dndzs = dndzs[None, :]
         
     # L2 norms (inverse geometric widths).
-    l2_pix = np.trapezoid(dndzs**2, z, axis=1)
-    l2_glob = np.trapezoid(dndz_glob**2, z)
+    l2_pix = np.trapz(dndzs**2, z, axis=1)
+    l2_glob = np.trapz(dndz_glob**2, z)
 
     geo_width_pix = np.where(l2_pix > 0, 1.0 / l2_pix, 0.0)
     geo_width_global = 1.0 / l2_glob if l2_glob > 0 else 0.0
@@ -208,14 +210,14 @@ def get_redshift_bins(z_vals, weights=None, n_bins=None, q_lo=0.001, q_hi=0.999)
 def cal_sigz(dndz,z):
     
     if dndz.ndim == 1:
-        I  = np.trapezoid(dndz, z)
-        mu = np.trapezoid(z * dndz, z) / I
-        var = np.trapezoid((z - mu)**2 * dndz, z) / I
+        I  = np.trapz(dndz, z)
+        mu = np.trapz(z * dndz, z) / I
+        var = np.trapz((z - mu)**2 * dndz, z) / I
 
     if dndz.ndim == 2:
-        I  = np.trapezoid(dndz, z, axis=1)
-        mu = np.trapezoid(z * dndz, z, axis=1) / I
-        var = np.trapezoid((z - mu[:,None])**2 * dndz, z, axis=1) / I
+        I  = np.trapz(dndz, z, axis=1)
+        mu = np.trapz(z * dndz, z, axis=1) / I
+        var = np.trapz((z - mu[:,None])**2 * dndz, z, axis=1) / I
 
     return mu, np.sqrt(var)
 
@@ -282,7 +284,7 @@ def compute_redshift_stats(pix_idx, z_vals, weights, n_pix):
     
     return std_z_all, std_z_pix, z_std_ratio
 
-def compute_redshift_stats_from_sums(w_sum_pix, wz_sum_pix, wz2_sum_pix, 
+def compute_redshift_stats_from_sums(w_sum_pix, wz_sum_pix, wz2_sum_pix,
                                      total_w, total_wz, total_wz2):
     """
     Compute global and per-pixel redshift standard deviation using pre-calculated sums.
@@ -291,11 +293,12 @@ def compute_redshift_stats_from_sums(w_sum_pix, wz_sum_pix, wz2_sum_pix,
     n_pix = len(w_sum_pix)
     if total_w <= 0:
         return 0.0, np.zeros(n_pix), 1.0
-        
+
     mean_z_all = total_wz / total_w
     std_z_all = np.sqrt(np.maximum(total_wz2 / total_w - mean_z_all**2, 0))
-    
-    mask_v = w_sum_pix > 0
+
+    min_count = STATS_PARAMS['min_count']
+    mask_v = w_sum_pix > min_count
     std_z_pix = np.zeros(n_pix)
     
     mean_z_pix = wz_sum_pix[mask_v] / w_sum_pix[mask_v]

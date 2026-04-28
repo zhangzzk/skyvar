@@ -25,18 +25,18 @@ PATHS = {
 # galaxies, runs the XGBoost classifier, and writes the predictions file.
 SIM_SETTINGS = {
     # --- HEALPix resolution ---
-    'sys_nside_sim': 128,        # Nside at which systematics maps are generated.
-    'sys_nside_stats': 128,      # Nside for grouping pixel-level statistics.
+    'sys_nside_sim': 1024,        # Nside at which systematics maps are generated.
+    'sys_nside_stats': 256,      # Nside for grouping pixel-level statistics.
 
     # --- Population ---
-    'n_pop_sample': 10_000,      # Galaxies drawn per sim pixel.
-    'chunk_size': 250_000_000,   # Max rows per simulation chunk.
+    'n_pop_sample': 50_000,      # Galaxies drawn per sim pixel.
+    'chunk_size': 500_000_000,   # Max rows per simulation chunk.
     'n_jobs': -1,                # Parallel workers (-1 = all CPUs).
 
     # --- Detection threshold (shared: selection.py + density_variation.py) ---
     # Galaxies with detection probability ≤ this value are discarded.
     # Used by apply_galaxy_selection() — the single entry-point for both scripts.
-    'detection_threshold': 0,
+    'detection_threshold': 0.1,
 
     'log_level': 'INFO',
 }
@@ -125,7 +125,7 @@ PHOTOZ_PARAMS = {
     'maglim2': 17,               # Bright-end magnitude cut.
 
     # --- SNR selection (mode='snr') ---
-    'snr_min': 0,                # Minimum SNR for lens selection.
+    'snr_min': 5,                # Minimum SNR for lens selection.
 }
 
 
@@ -153,7 +153,7 @@ ANALYSIS_SETTINGS = {
     #   'snr'    → SNR cut (snr_min from §5)
     #   'maglim' → MagLim cut (maglim0/1/2 from §5)
     #   None     → detection threshold only
-    'selection_mode': None,
+    'selection_mode': 'maglim',
 }
 
 STATS_PARAMS = {
@@ -165,11 +165,11 @@ STATS_PARAMS = {
 # 7. COSMOLOGY & THEORY (clustering.py, density_variation.py)
 # ==============================================================================
 COSMO_PARAMS = {
-    'Omega_c': 0.25,
-    'Omega_b': 0.05,
-    'h': 0.67,
-    'sigma8': 0.8,
-    'n_s': 0.965,
+    'Omega_c': 0.2645,   # Omega_c h^2 = 0.1200 -> Omega_c = 0.1200 / 0.6736^2
+    'Omega_b': 0.0493,   # Omega_b h^2 = 0.02237 -> Omega_b = 0.02237 / 0.6736^2
+    'h': 0.6736,
+    'sigma8': 0.8111,
+    'n_s': 0.9649,
 }
 
 # Angular power spectrum / correlation function settings.
@@ -185,7 +185,7 @@ CLUSTERING_SETTINGS = {
     'theta_bins': 30,
 
     'auto_only': True,
-    'flat_global': True,
+    'flat_global': False,
 
     # --- TreeCorr binning (density_variation.py NN correlation) ---
     'nbins': 20,
@@ -208,7 +208,7 @@ DENSITY_SETTINGS = {
     # --- Mock galaxy catalog generation ---
     'mock': {
         # n(z) source for GLASS mock:  'toy' = Gaussian, 'measured' = from predictions.
-        'nz_source': 'toy',
+        'nz_source': 'measured',
 
         # Toy Gaussian n(z) parameters (only used when nz_source='toy').
         'gaussian_mean': 0.6,
@@ -225,7 +225,7 @@ DENSITY_SETTINGS = {
 
         # Selection mode for _compute_measured_nz() when nz_source='measured'.
         # Uses apply_galaxy_selection(mode=...) — see §5.
-        'selection_mode': 'snr',       # 'snr', 'maglim', or 'none'
+        'selection_mode': 'maglim',       # 'snr', 'maglim', or 'none'
     },
 
     # --- TreeCorr NN correlation ---

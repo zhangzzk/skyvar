@@ -107,22 +107,6 @@ def _load_gls(gls_path: str):
         return np.loadtxt(gls_path)
 
 
-def _compute_measured_nz(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """Compute the global detected n(z) from a pre-selected predictions catalog.
-
-    Mirrors selection.py's dndz_det: histogram(redshift_input_p, weights=detection, density=True).
-    """
-    # Redshift grid from config (same as selection.py).
-    z_centers, z_edges = utils.get_redshift_bins(None)
-
-    # Detection-weighted histogram, density=True → integrates to 1.
-    weights = pd.to_numeric(df["detection"], errors="coerce").fillna(0.0).to_numpy()
-    dndz, _ = np.histogram(
-        df["redshift_input_p"].to_numpy(), bins=z_edges,
-        density=True, weights=weights,
-    )
-    return z_centers, dndz
-
 
 def _build_nz_for_glass(z_glass: np.ndarray) -> np.ndarray:
     """Build the n(z) to feed GLASS, dispatching on MOCK_CFG['nz_source'].
@@ -148,7 +132,7 @@ def _build_nz_for_glass(z_glass: np.ndarray) -> np.ndarray:
         if "z" not in _MEASURED_NZ_CACHE or "dndz" not in _MEASURED_NZ_CACHE:
             raise RuntimeError(
                 "nz_source='measured' but _MEASURED_NZ_CACHE is empty. "
-                "main() must call _compute_measured_nz(df) first."
+                "_MEASURED_NZ_CACHE must be populated before calling _build_nz_for_glass."
             )
         z_sel = _MEASURED_NZ_CACHE["z"]
         dndz_sel = _MEASURED_NZ_CACHE["dndz"]
@@ -212,62 +196,6 @@ def _build_mock_catalogs(glasscat: str, glasscat_rand: str) -> None:
     glass_mock.glass_mock(Oc, Ob, h, bias, z, n_arcmin2, dndz.copy(), vis, nside, glasscat_rand, gls=gls, random=True)
     logger.info("Generated mock catalogs: %s ; %s", glasscat, glasscat_rand)
 
-
-def build_mean_p_map(df: pd.DataFrame) -> np.ndarray:
-    """Build mean_p map from a pre-selected predictions catalog.
-
-    Numerator : sum(detection) per stats-pixel.
-    Denominator: total simulated galaxies per stats-pixel (geometric).
-    """
-    nside_sim = int(SIM_CFG["sys_nside_sim"])
-    npix = hp.nside2npix(SYS_NSIDE)
-    mean_p = np.full(npix, hp.UNSEEN)
-
-    _, seen_idx_stats, seen_idx_sim = selection.load_system_maps(return_sim_idx=True)
-    pix_idx = df["pix_idx_input_p"].to_numpy(dtype=np.int64)
-    det = df["detection"].to_numpy(dtype=float)
-
-    n_pop_sample = int(SIM_CFG["n_pop_sample"])
-    den = selection.get_input_counts_per_stats_pixel(
-        seen_idx_sim, nside_sim=nside_sim,
-        nside_stats=SYS_NSIDE, n_pop_sample=n_pop_sample,
-    ).astype(float)
-
-    # Support the three conventions seen in practice:
-    # 1. local seen-pixel ids (notebook)
-    # 2. global stats-pixel ids
-    # 3. global simulation-pixel ids (selection.py raw preds)
-    if pix_idx.size > 0 and pix_idx.max() < len(seen_idx_stats):
-        num_seen = np.bincount(pix_idx, weights=det, minlength=len(seen_idx_stats))
-        den_seen = den[seen_idx_stats]
-        frac_seen = np.divide(
-            num_seen,
-            den_seen,
-            out=np.zeros(len(seen_idx_stats), dtype=float),
-            where=den_seen > 0,
-        )
-        mean_p[seen_idx_stats] = frac_seen
-    elif pix_idx.size > 0 and pix_idx.max() < npix:
-        num = np.bincount(pix_idx, weights=det, minlength=npix)
-        frac_pix = np.divide(num, den, out=np.zeros(npix, dtype=float), where=den > 0)
-        mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
-    else:
-        pix_idx_stats = selection.map_pix_sim_to_stats(
-            pix_idx,
-            nside_sim=nside_sim,
-            nside_stats=SYS_NSIDE,
-        )
-        num = np.bincount(pix_idx_stats, weights=det, minlength=npix)
-        frac_pix = np.divide(num, den, out=np.zeros(npix, dtype=float), where=den > 0)
-        mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
-
-    if bool(MOCK_CFG.get("normalize_detection_by_max", True)):
-        vmax = np.max(mean_p[seen_idx_stats]) if len(seen_idx_stats) > 0 else 0.0
-        if vmax > 0:
-            mean_p[seen_idx_stats] /= vmax
-
-    logger.info("Built mean_p map (%d selected galaxies)", len(df))
-    return mean_p
 
 
 def load_mock_catalogs() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -472,18 +400,80 @@ def compute_theory_curve(
     return theta_deg * 60.0, w
 
 
-def load_predictions() -> pd.DataFrame:
-    """Load and validate the predictions file."""
-    preds_path = utils.get_output_path("output_preds")
-    if not os.path.exists(preds_path):
-        raise FileNotFoundError(f"Predictions file not found: {preds_path}")
-    df = pd.read_feather(preds_path)
-    required = {"pix_idx_input_p", "redshift_input_p", "detection"}
-    missing = sorted(required.difference(df.columns))
-    if missing:
-        raise KeyError(f"Predictions file missing required columns: {missing}")
-    logger.info("Loaded %d predictions from %s", len(df), preds_path)
-    return df
+def _build_maps_from_chunks(sel_mode, need_measured_nz):
+    """Stream prediction chunks to build mean_p map and optionally measured n(z)."""
+    import gc
+
+    chunk_dir = utils.get_output_path("pred_chunks")
+    chunk_files = sorted(
+        os.path.join(chunk_dir, f)
+        for f in os.listdir(chunk_dir)
+        if f.endswith('.feather')
+    )
+    if not chunk_files:
+        raise FileNotFoundError(f"No prediction chunks found in {chunk_dir}")
+    logger.info("Streaming %d prediction chunks from %s", len(chunk_files), chunk_dir)
+
+    nside_sim = int(SIM_CFG["sys_nside_sim"])
+    npix = hp.nside2npix(SYS_NSIDE)
+
+    _, seen_idx_stats, seen_idx_sim = selection.load_system_maps(return_sim_idx=True)
+    den = selection.get_input_counts_per_stats_pixel(
+        seen_idx_sim, nside_sim=nside_sim,
+        nside_stats=SYS_NSIDE, n_pop_sample=int(SIM_CFG["n_pop_sample"]),
+    ).astype(float)
+
+    num = np.zeros(npix, dtype=float)
+    n_selected = 0
+
+    if need_measured_nz:
+        z_centers, z_edges = utils.get_redshift_bins(None)
+        nz_hist_w = np.zeros(len(z_centers), dtype=float)
+        nz_total_w = 0.0
+
+    for i, fpath in enumerate(chunk_files):
+        chunk = pd.read_feather(fpath)
+        chunk = selection.apply_galaxy_selection(chunk, mode=sel_mode)
+        if chunk.empty:
+            del chunk; gc.collect()
+            continue
+
+        pix_idx = chunk["pix_idx_input_p"].to_numpy(dtype=np.int64)
+        det = chunk["detection"].to_numpy(dtype=float)
+
+        pix_idx_stats = selection.map_pix_sim_to_stats(
+            pix_idx, nside_sim=nside_sim, nside_stats=SYS_NSIDE,
+        )
+        num += np.bincount(pix_idx_stats, weights=det, minlength=npix)
+
+        if need_measured_nz:
+            h, _ = np.histogram(chunk["redshift_input_p"].to_numpy(), bins=z_edges, weights=det)
+            nz_hist_w += h
+            nz_total_w += det.sum()
+
+        n_selected += len(chunk)
+        if (i + 1) % 10 == 0 or (i + 1) == len(chunk_files):
+            logger.info("Chunk %d/%d (%d selected)", i + 1, len(chunk_files), n_selected)
+        del chunk; gc.collect()
+
+    # Finalize mean_p map
+    mean_p = np.full(npix, hp.UNSEEN)
+    frac_pix = np.divide(num, den, out=np.zeros(npix, dtype=float), where=den > 0)
+    mean_p[seen_idx_stats] = frac_pix[seen_idx_stats]
+
+    if bool(MOCK_CFG.get("normalize_detection_by_max", True)):
+        vmax = np.max(mean_p[seen_idx_stats]) if len(seen_idx_stats) > 0 else 0.0
+        if vmax > 0:
+            mean_p[seen_idx_stats] /= vmax
+
+    logger.info("Built mean_p map (%d selected galaxies)", n_selected)
+
+    # Finalize measured n(z)
+    measured_nz = None
+    if need_measured_nz and nz_total_w > 0:
+        measured_nz = (z_centers, nz_hist_w / (nz_total_w * np.diff(z_edges)))
+
+    return mean_p, measured_nz
 
 
 def main() -> None:
@@ -492,33 +482,25 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    # 0. Load predictions once, apply selection once.
-    df_raw = load_predictions()
-    sel_mode = _normalize_selection_mode(ANA_CFG.get("selection_mode", None))
-    df = selection.apply_galaxy_selection(df_raw, mode=sel_mode)
-    del df_raw
-    logger.info("Selected %d galaxies (mode=%s)", len(df), sel_mode)
-
-    # 1. Build detection-fraction map.
-    mean_p = build_mean_p_map(df)
-
-    # 2. Generate / load mock galaxy catalogs.
-    #    If nz_source='measured', the n(z) is computed from df here.
+    sel_mode = _normalize_selection_mode(MOCK_CFG.get("selection_mode", None))
     nz_source = str(MOCK_CFG.get("nz_source", "toy")).strip().lower()
-    if nz_source == "measured":
-        z_sel, dndz_sel = _compute_measured_nz(df)
-        # Stash for _build_nz_for_glass to pick up.
-        _MEASURED_NZ_CACHE["z"] = z_sel
-        _MEASURED_NZ_CACHE["dndz"] = dndz_sel
 
+    # 0. Stream prediction chunks → mean_p map (+ optional measured n(z)).
+    mean_p, measured_nz = _build_maps_from_chunks(sel_mode, nz_source == "measured")
+
+    if measured_nz is not None:
+        _MEASURED_NZ_CACHE["z"] = measured_nz[0]
+        _MEASURED_NZ_CACHE["dndz"] = measured_nz[1]
+
+    # 1. Generate / load mock galaxy catalogs.
     lon, lat, lon_rand, lat_rand = load_mock_catalogs()
     lon, lat, lon_rand, lat_rand = apply_tile_filter(lon, lat, lon_rand, lat_rand)
     logger.info("Tile-filtered mock catalog sizes: data=%d random=%d", lon.size, lon_rand.size)
 
-    # 3. Measure w(theta) with selection applied.
+    # 2. Measure w(theta) with selection applied.
     result = measure_wtheta(lon, lat, lon_rand, lat_rand, mean_p)
 
-    # 4. Theory curve (same n(z) and bias as the mocks).
+    # 3. Theory curve.
     theta_theory, w_theory = compute_theory_curve(
         theta_min_arcmin=result.theta_orig.min(),
         theta_max_arcmin=result.theta_orig.max(),
@@ -526,14 +508,35 @@ def main() -> None:
     from dataclasses import replace
     result = replace(result, theta_theory=theta_theory, w_theory=w_theory)
 
-    # 5. Save plot.
+    # 4. Save plot + data.
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
     output_dir = os.path.join(project_root, "output")
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, "wtheta_density_variation.png")
 
+    fits_dir = config.PATHS["sys_preds_dir"]
+    os.makedirs(fits_dir, exist_ok=True)
+    fits_path = os.path.join(fits_dir, f"wtheta_density_variation_{_density_cache_tag()}.fits")
+
     plotting.plot_density_variation_wtheta(result, out_path)
     logger.info("Saved: %s", out_path)
+
+    hdul = fits.HDUList([
+        fits.PrimaryHDU(),
+        fits.ImageHDU(result.theta_orig, name="THETA_ORIG"),
+        fits.ImageHDU(result.w_orig, name="W_ORIG"),
+        fits.ImageHDU(result.cov_orig, name="COV_ORIG"),
+        fits.ImageHDU(result.theta_ur, name="THETA_UR"),
+        fits.ImageHDU(result.w_ur, name="W_UR"),
+        fits.ImageHDU(result.cov_ur, name="COV_UR"),
+        fits.ImageHDU(result.theta_or, name="THETA_OR"),
+        fits.ImageHDU(result.w_or, name="W_OR"),
+        fits.ImageHDU(result.cov_or, name="COV_OR"),
+        fits.ImageHDU(result.theta_theory, name="THETA_THEORY"),
+        fits.ImageHDU(result.w_theory, name="W_THEORY"),
+    ])
+    hdul.writeto(fits_path, overwrite=True)
+    logger.info("Saved: %s", fits_path)
 
 
 if __name__ == "__main__":

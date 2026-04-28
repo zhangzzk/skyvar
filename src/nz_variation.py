@@ -76,8 +76,8 @@ def main():
     cosmo = build_pyccl_cosmology()
     
     ce = ClusteringEnhancement(
-        cosmo, 
-        ell_max=config.CLUSTERING_SETTINGS['ell_max'], 
+        cosmo,
+        ell_max=config.CLUSTERING_SETTINGS['ell_max'],
         ell_min=config.CLUSTERING_SETTINGS['ell_min']
     )
     

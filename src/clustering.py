@@ -196,13 +196,13 @@ class ClusteringEnhancement:
                     cl_ij /= fsky
 
                 val2 = self._cl_to_wtheta_fullsky(cl_ij, theta_rad, min(self.ell_min, lmax))
-                
+
                 delta_w_nz_1[i, j] = val1
                 delta_w_nz_2[i, j] = val2
                 if not auto_only and i != j:
                     delta_w_nz_1[j, i] = val1
                     delta_w_nz_2[j, i] = val2
-        
+
         return delta_w_nz_1, delta_w_nz_2
 
     def _get_bin_tracer(self, z_support, z_lo, z_hi, dz, bias=None):

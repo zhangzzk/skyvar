@@ -63,6 +63,7 @@ GAL_CAT_PATH = config.PATHS['gal_cat']
 MOCK_SYS_MAP_PATH = utils.get_output_path("mock_sys_map")
 MODEL_JSON = config.PATHS['model_json']
 OUTPUT_PREDS = utils.get_output_path("output_preds")
+PRED_CHUNKS_DIR = utils.get_output_path("pred_chunks")
 DETECTION_THRESHOLD = config.SIM_SETTINGS['detection_threshold']
 NPIX = hp.nside2npix(SYS_NSIDE_STATS)
 PHOTOZ_PARAMS = config.PHOTOZ_PARAMS
@@ -529,13 +530,14 @@ def apply_galaxy_selection(df, mode=None):
         None     – detection threshold only.
     """
 
-    df = compute_obs_stats(df)
-    # 1. Detection threshold.
+    # 1. Detection threshold (applied BEFORE expensive obs-stats computation).
     det_threshold = float(config.SIM_SETTINGS.get('detection_threshold', 0.0))
     det_vals = pd.to_numeric(df['detection'], errors='coerce').fillna(0.0).to_numpy()
     n0 = len(df)
     df = df.loc[det_vals > det_threshold].copy()
     logger.info("Detection threshold %.3g: kept %d / %d", det_threshold, len(df), n0)
+
+    df = compute_obs_stats(df)
 
     if mode is None:
         return df
@@ -765,9 +767,9 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
     logger.info("Detection Rate Stats: frac=%.4f, min=%.4f, max=%.4f, mean=%.4f",
                 frac_det, np.min(frac_det_pix), np.max(frac_det_pix), np.mean(frac_det_pix))
 
-    plt_nz.plt_map(mean_p, SYS_NSIDE_STATS, SEEN_idx, 
+    plt_nz.plt_map(mean_p, SYS_NSIDE_STATS, SEEN_idx,
             save_path=os.path.join(output_dir, "detection_rate_map.png"))
-    
+
     results = {}
     dz = np.diff(edges)
 
@@ -782,7 +784,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
     metadata_rows_full = sys_res_full.loc[["total_detected"]].copy()
     sys_res_data_full = sys_res_full.reindex(SEEN_idx).fillna(0)
     sys_res_final_full = pd.concat([sys_res_data_full, metadata_rows_full])
-    
+
     results['full'] = process_stats(
         sys_res_final_full,
         z,
@@ -793,7 +795,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
     # Keep full-sample fractions consistent with direct detection map definition.
     results['full']['frac'] = frac_det
     results['full']['frac_pix'] = frac_det_pix
-    
+
     # Tomographic bins.
     tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
     for i in range(len(tomo_bin_edges)-1):
@@ -810,7 +812,7 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
             meta_i = sys_res_i.loc[["total_detected"]].copy()
             sys_res_i_data = sys_res_i.reindex(SEEN_idx).fillna(0)
             sys_res_i_final = pd.concat([sys_res_i_data, meta_i])
-            
+
             results[f'tomo_{i}'] = process_stats(
                 sys_res_i_final,
                 z,
@@ -818,7 +820,198 @@ def generate_summary_statistics_from_cat(cla_cat, SEEN_idx, seen_idx_sim, output
                 smooth=config.ANALYSIS_SETTINGS['smooth_nz'],
                 n_input_pix=n_input_pix[SEEN_idx],
             )
-            
+
+    return results
+
+
+def _build_sys_res_from_accumulators(pixel_counts, w_sum, wz_sum, wz2_sum,
+                                     total_w, total_wz, total_wz2,
+                                     global_hist, z, edges, n_pix, label="full"):
+    """Build a sys_res DataFrame from accumulated statistics.
+
+    Produces the same format as groupby_dndz() so that process_stats() can
+    consume it without changes.
+    """
+    n_z = len(z)
+    dz = np.diff(edges)
+
+    # Per-pixel normalized histograms (density).
+    sum_num = pixel_counts.sum(axis=1)
+    hists = np.zeros_like(pixel_counts)
+    active = sum_num > 0
+    hists[active] = pixel_counts[active] / (sum_num[active][:, None] * dz)
+
+    # Redshift statistics from running sums.
+    std_z_all, std_z_pix, z_std_ratio = utils.compute_redshift_stats_from_sums(
+        w_sum, wz_sum, wz2_sum, total_w, total_wz, total_wz2)
+
+    # Weighted inverse-std ratio (matches groupby_dndz logic).
+    mask_v = (sum_num > 0) & (std_z_pix > 0)
+    mean_std_z_pix_unweighted = np.mean(std_z_pix[sum_num > 0]) if np.any(sum_num > 0) else 0.0
+    if np.any(mask_v):
+        z_std_ratio_weighted = np.average(
+            1.0 / std_z_pix[mask_v], weights=sum_num[mask_v]) * std_z_all
+    else:
+        z_std_ratio_weighted = 1.0
+
+    logger.info(
+        "[%10s] Redshift-based std ratio: %.6f "
+        "(pix-wtd inverse: %.6f; mean_std_pix=%.6f)",
+        label, z_std_ratio, z_std_ratio_weighted, mean_std_z_pix_unweighted)
+
+    # Global density-normalized histogram (matches np.histogram density=True).
+    total_gh = global_hist.sum()
+    dndz_det = global_hist / (total_gh * dz) if total_gh > 0 else np.zeros(n_z)
+
+    out = pd.DataFrame(hists, index=np.arange(n_pix))
+    out.columns = np.arange(n_z)
+    out["sum_num"] = sum_num
+    out["std_z_pix"] = std_z_pix
+    out.attrs['z_std_ratio'] = z_std_ratio
+    out.attrs['z_std_ratio_pix_weighted'] = z_std_ratio_weighted
+    out.loc["total_detected"] = list(dndz_det) + [total_w, std_z_all]
+
+    return out
+
+
+def generate_summary_statistics_from_chunks(chunk_files, SEEN_idx, seen_idx_sim,
+                                            output_dir, z, edges, sel_mode):
+    """Compute summary statistics by streaming chunk files one at a time.
+
+    This avoids loading the full prediction catalog into memory.  Each chunk
+    is read, selected, processed, and its per-pixel histogram / redshift
+    statistics are accumulated into fixed-size arrays (~3 GB total for
+    nside_stats=256, 60 z-bins, 6 tomo bins).
+    """
+    n_z = len(z)
+    dz = np.diff(edges)
+    tomo_bin_edges = config.ANALYSIS_SETTINGS['tomo_bin_edges']
+    n_tomo = len(tomo_bin_edges) - 1
+
+    n_input_pix = get_input_counts_per_stats_pixel(
+        seen_idx_sim, SYS_NSIDE_SIM, SYS_NSIDE_STATS, N_POP_SAMPLE)
+    logger.info("Total input galaxies (from footprint): %s", f"{int(n_input_pix.sum()):,}")
+
+    # ---- Accumulators (full sample) ----
+    hist_counts = np.zeros((NPIX, n_z))
+    w_sum = np.zeros(NPIX)
+    wz_sum = np.zeros(NPIX)
+    wz2_sum = np.zeros(NPIX)
+    total_w, total_wz, total_wz2 = 0.0, 0.0, 0.0
+    global_hist = np.zeros(n_z)
+
+    # ---- Accumulators (per tomo bin) ----
+    hist_counts_t = [np.zeros((NPIX, n_z)) for _ in range(n_tomo)]
+    w_sum_t = [np.zeros(NPIX) for _ in range(n_tomo)]
+    wz_sum_t = [np.zeros(NPIX) for _ in range(n_tomo)]
+    wz2_sum_t = [np.zeros(NPIX) for _ in range(n_tomo)]
+    total_w_t = np.zeros(n_tomo)
+    total_wz_t = np.zeros(n_tomo)
+    total_wz2_t = np.zeros(n_tomo)
+    global_hist_t = [np.zeros(n_z) for _ in range(n_tomo)]
+
+    for ci, fpath in enumerate(chunk_files):
+        logger.info("Accumulating stats from chunk %d/%d ...", ci + 1, len(chunk_files))
+        chunk = pd.read_feather(fpath)
+
+        chunk = apply_galaxy_selection(chunk, mode=sel_mode)
+        if chunk.empty:
+            del chunk
+            gc.collect()
+            continue
+        chunk = process_classified_catalog(chunk)
+
+        # Map sim pixels → stats pixels.
+        pix_stats = map_pix_sim_to_stats(
+            chunk["pix_idx_input_p"].to_numpy(dtype=np.int64),
+            SYS_NSIDE_SIM, SYS_NSIDE_STATS)
+
+        z_vals = chunk["redshift_input_p"].values
+        det_w = chunk["detection"].values
+
+        # Histogram bin indices.
+        zbins = np.digitize(z_vals, edges) - 1
+        in_range = (zbins >= 0) & (zbins < n_z) & (pix_stats >= 0) & (pix_stats < NPIX)
+        flat_idx = pix_stats[in_range] * n_z + zbins[in_range]
+
+        # ---- Full sample ----
+        hist_counts += np.bincount(
+            flat_idx, weights=det_w[in_range], minlength=NPIX * n_z
+        ).reshape(NPIX, n_z)
+        w_sum += np.bincount(pix_stats, weights=det_w, minlength=NPIX)
+        wz_sum += np.bincount(pix_stats, weights=det_w * z_vals, minlength=NPIX)
+        wz2_sum += np.bincount(pix_stats, weights=det_w * z_vals ** 2, minlength=NPIX)
+        total_w += det_w.sum()
+        total_wz += (det_w * z_vals).sum()
+        total_wz2 += (det_w * z_vals ** 2).sum()
+        global_hist += np.bincount(
+            zbins[in_range], weights=det_w[in_range], minlength=n_z).astype(float)
+
+        # ---- Per tomo bin ----
+        for i in range(n_tomo):
+            tomo_col = f"tomo_p_{i}"
+            if tomo_col not in chunk.columns:
+                continue
+            tw = det_w * chunk[tomo_col].values
+            tw_in = tw[in_range]
+            hist_counts_t[i] += np.bincount(
+                flat_idx, weights=tw_in, minlength=NPIX * n_z
+            ).reshape(NPIX, n_z)
+            w_sum_t[i] += np.bincount(pix_stats, weights=tw, minlength=NPIX)
+            wz_sum_t[i] += np.bincount(pix_stats, weights=tw * z_vals, minlength=NPIX)
+            wz2_sum_t[i] += np.bincount(pix_stats, weights=tw * z_vals ** 2, minlength=NPIX)
+            total_w_t[i] += tw.sum()
+            total_wz_t[i] += (tw * z_vals).sum()
+            total_wz2_t[i] += (tw * z_vals ** 2).sum()
+            global_hist_t[i] += np.bincount(
+                zbins[in_range], weights=tw_in, minlength=n_z).astype(float)
+
+        del chunk
+        gc.collect()
+        logger.info("    Memory usage: %.2f GB", get_memory_usage())
+
+    # ---- Build results from accumulators ----
+    # Detection map.
+    frac_det, frac_det_pix_full = compute_detection_fractions(w_sum, n_input_pix)
+    frac_det_pix = frac_det_pix_full[SEEN_idx]
+    mean_p = np.full(NPIX, hp.UNSEEN)
+    mean_p[SEEN_idx] = frac_det_pix
+    logger.info("Detection Rate Stats: frac=%.4f, min=%.4f, max=%.4f, mean=%.4f",
+                frac_det, np.min(frac_det_pix), np.max(frac_det_pix), np.mean(frac_det_pix))
+    plt_nz.plt_map(mean_p, SYS_NSIDE_STATS, SEEN_idx,
+                   save_path=os.path.join(output_dir, "detection_rate_map.png"))
+
+    results = {}
+
+    # Full sample.
+    sys_res_full = _build_sys_res_from_accumulators(
+        hist_counts, w_sum, wz_sum, wz2_sum,
+        total_w, total_wz, total_wz2, global_hist,
+        z, edges, NPIX, label="full")
+    metadata_rows_full = sys_res_full.loc[["total_detected"]].copy()
+    sys_res_data_full = sys_res_full.reindex(SEEN_idx).fillna(0)
+    sys_res_final_full = pd.concat([sys_res_data_full, metadata_rows_full])
+    results['full'] = process_stats(
+        sys_res_final_full, z, SEEN_idx,
+        smooth=config.ANALYSIS_SETTINGS['smooth_nz'],
+        n_input_pix=n_input_pix[SEEN_idx])
+    results['full']['frac'] = frac_det
+    results['full']['frac_pix'] = frac_det_pix
+
+    # Tomo bins.
+    for i in range(n_tomo):
+        sys_res_i = _build_sys_res_from_accumulators(
+            hist_counts_t[i], w_sum_t[i], wz_sum_t[i], wz2_sum_t[i],
+            total_w_t[i], total_wz_t[i], total_wz2_t[i], global_hist_t[i],
+            z, edges, NPIX, label=f"tomo_{i}")
+        meta_i = sys_res_i.loc[["total_detected"]].copy()
+        sys_res_i_data = sys_res_i.reindex(SEEN_idx).fillna(0)
+        sys_res_i_final = pd.concat([sys_res_i_data, meta_i])
+        results[f'tomo_{i}'] = process_stats(
+            sys_res_i_final, z, SEEN_idx,
+            smooth=config.ANALYSIS_SETTINGS['smooth_nz'],
+            n_input_pix=n_input_pix[SEEN_idx])
+
     return results
 
 
@@ -1006,6 +1199,18 @@ def load_fits_output(bin_idx=4):
 
 
 
+def _find_chunk_files(chunk_dir):
+    """Return sorted list of chunk feather files in a directory, or empty list."""
+    if not os.path.isdir(chunk_dir):
+        return []
+    files = sorted(
+        os.path.join(chunk_dir, f)
+        for f in os.listdir(chunk_dir)
+        if f.endswith('.feather')
+    )
+    return files
+
+
 def main():
     logging.basicConfig(level=getattr(logging, config.SIM_SETTINGS.get('log_level', 'INFO')),
                         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
@@ -1020,47 +1225,56 @@ def main():
 
     maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
 
-    # Selection mode from config — passed directly to apply_galaxy_selection.
+    # Selection mode from config.
     sel_mode = config.ANALYSIS_SETTINGS.get('selection_mode', None)
+    if sel_mode is not None:
+        sel_mode = str(sel_mode).strip().lower()
+        if sel_mode in ("", "none"):
+            sel_mode = None
 
-    if config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
+    if config.ANALYSIS_SETTINGS.get('load_preds', True) and _find_chunk_files(PRED_CHUNKS_DIR):
+        # Streaming load from chunk files (memory-safe).
+        chunk_files = _find_chunk_files(PRED_CHUNKS_DIR)
+        logger.info("Loading existing prediction chunks (%d files) from %s ...",
+                     len(chunk_files), PRED_CHUNKS_DIR)
+        results = generate_summary_statistics_from_chunks(
+            chunk_files, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges, sel_mode)
+
+    elif config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
+        # Legacy path: single feather file.
         logger.info("Loading existing predictions from %s...", OUTPUT_PREDS)
         cla_cat = pd.read_feather(OUTPUT_PREDS)
         cla_cat = apply_galaxy_selection(cla_cat, mode=sel_mode)
         cla_cat = process_classified_catalog(cla_cat)
-        
         results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
+
     else:
-        if not os.path.exists(OUTPUT_PREDS):
-             logger.info("Predictions file %s not found. Running simulation...", OUTPUT_PREDS)
+        if not os.path.exists(OUTPUT_PREDS) and not _find_chunk_files(PRED_CHUNKS_DIR):
+             logger.info("Predictions not found. Running simulation...")
         gal_cat = load_and_filter_catalog()
-        
+
         chunk_files, SEEN_idx, SEEN_idx_SIM = simulate_and_classify_chunked(gal_cat, z=z, edges=edges, output_dir=output_dir)
-        
-        # Consolidate all predicted primaries before applying detection threshold.
-        logger.info("Re-assembling %d prediction chunks...", len(chunk_files))
-        cla_cat = pd.concat([pd.read_feather(f) for f in chunk_files], ignore_index=True)
+        del gal_cat
+        gc.collect()
 
-        logger.info("Saving raw full prediction catalog to %s...", OUTPUT_PREDS)
-        os.makedirs(os.path.dirname(OUTPUT_PREDS), exist_ok=True)
-        cla_cat.to_feather(OUTPUT_PREDS)
-
-        cla_cat = apply_galaxy_selection(cla_cat, mode=sel_mode)
-        cla_cat = process_classified_catalog(cla_cat)
-
-        results = generate_summary_statistics_from_cat(cla_cat, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges)
-            
-        logger.info("    Memory usage after re-assembly and processing: %.2f GB", get_memory_usage())
-        
-        # Clean up temporary chunks.
+        # Move temp chunks to permanent storage.
+        os.makedirs(PRED_CHUNKS_DIR, exist_ok=True)
+        perm_chunk_files = []
         for f in chunk_files:
-            os.remove(f)
+            dest = os.path.join(PRED_CHUNKS_DIR, os.path.basename(f))
+            os.rename(f, dest)
+            perm_chunk_files.append(dest)
         temp_dir = os.path.join(os.path.dirname(OUTPUT_PREDS), "temp_chunks")
         try:
             os.rmdir(temp_dir)
-        except:
+        except OSError:
             pass
-            
+
+        # Compute summary statistics by streaming through chunks (no monolithic concat).
+        logger.info("Computing summary statistics from %d prediction chunks...", len(perm_chunk_files))
+        results = generate_summary_statistics_from_chunks(
+            perm_chunk_files, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges, sel_mode)
+
         logger.info("    Memory usage at end of simulation: %.2f GB", get_memory_usage())
     
     # plt_nz.save_diagnostic_plots(results, output_dir)
