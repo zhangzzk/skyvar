@@ -13,7 +13,7 @@ import numpy as np
 #   SKYVAR_GAL_CAT         input galaxy catalog (FITS).
 #   SKYVAR_MODEL_JSON      XGBoost detection-classifier JSON.
 #   SKYVAR_BOUNDARY_NPY    classifier training-boundary array.
-#   BLENDING_EMULATOR_DIR  directory containing nz_utils / cosmic_toolbox.
+#   BLENDEMU_DIR           parent of the blendemu package (so `import blendemu` works).
 #   TIAOGENG_DIR           directory containing tiaogeng/codes/src and tiaogeng/data.
 
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,7 +21,7 @@ _DEFAULT_BASE_DIR = os.path.dirname(_SRC_DIR)
 
 BASE_DIR = os.environ.get("SKYVAR_BASE_DIR", _DEFAULT_BASE_DIR)
 PROJECT_DATA_DIR = os.environ.get("SKYVAR_DATA_DIR", os.path.join(BASE_DIR, "data"))
-BLENDING_EMULATOR_DIR = os.environ.get("BLENDING_EMULATOR_DIR", "")
+BLENDEMU_DIR = os.environ.get("BLENDEMU_DIR", "")
 
 PATHS = {
     'gal_cat': os.environ.get(

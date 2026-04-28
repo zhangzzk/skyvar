@@ -42,13 +42,13 @@ except ImportError:
     import plotting as plt_nz
 
 # Make external emulator modules importable.
-BLENDING_EMULATOR_DIR = config.BLENDING_EMULATOR_DIR
-if BLENDING_EMULATOR_DIR not in sys.path:
-    sys.path.append(BLENDING_EMULATOR_DIR)
+BLENDEMU_DIR = config.BLENDEMU_DIR
+if BLENDEMU_DIR and BLENDEMU_DIR not in sys.path:
+    sys.path.append(BLENDEMU_DIR)
 
 # Import external modules after updating sys.path.
 try:
-    import nz_utils
+    from blendemu import nz_utils
     from cosmic_toolbox import arraytools as at
 except ImportError as e:
     logger.warning("Could not import some custom modules: %s", e)

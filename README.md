@@ -1,14 +1,10 @@
 ```text
-   ·  ░ ▒ ░  ·  ▓ ░ ▒  ·  ░ ▓ ▒ ░  ·  ▒ ░ ▓  ·  ░ ▒ ░  ·  ▓ ░ ▒  ·
-
        ███████╗██╗  ██╗██╗   ██╗██╗   ██╗ █████╗ ██████╗
        ██╔════╝██║ ██╔╝╚██╗ ██╔╝██║   ██║██╔══██╗██╔══██╗
        ███████╗█████╔╝  ╚████╔╝ ██║   ██║███████║██████╔╝
        ╚════██║██╔═██╗   ╚██╔╝  ╚██╗ ██╔╝██╔══██║██╔══██╗
        ███████║██║  ██╗   ██║    ╚████╔╝ ██║  ██║██║  ██║
        ╚══════╝╚═╝  ╚═╝   ╚═╝     ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝
-
-   ·  ▒ ░ ▓  ·  ░ ▒ ░  ·  ▓ ░ ▒  ·  ░ ▓ ▒ ░  ·  ▒ ░ ▓  ·  ░ ▒ ░  ·
 ```
 
 ---
@@ -62,10 +58,12 @@ The pipeline also calls into a few external research codes that are *not*
 packaged here. You need to clone them separately and point at them via
 environment variables:
 
-| Variable                | Used for                                            |
-|-------------------------|-----------------------------------------------------|
-| `BLENDING_EMULATOR_DIR` | provides `nz_utils` and `cosmic_toolbox.arraytools` |
-| `TIAOGENG_DIR`          | provides `glass_mock` and `generate_mocksys`        |
+| Variable         | Used for                                                   |
+|------------------|------------------------------------------------------------|
+| `BLENDEMU_DIR`   | parent dir of the `blendemu` package (provides `nz_utils`) |
+| `TIAOGENG_DIR`   | provides `glass_mock` and `generate_mocksys`               |
+
+`cosmic_toolbox.arraytools` is also imported directly — install it separately.
 
 If you do not have access to these, the corresponding entry points
 (`density_variation.main`, parts of `selection.main`) will fail on import.
@@ -87,7 +85,7 @@ export SKYVAR_DATA_DIR=/path/to/large/scratch
 export SKYVAR_GAL_CAT=/path/to/input/catalog.fits
 export SKYVAR_MODEL_JSON=/path/to/classifier.json
 export SKYVAR_BOUNDARY_NPY=/path/to/boundary.npy
-export BLENDING_EMULATOR_DIR=/path/to/blending_emulator
+export BLENDEMU_DIR=/path/to/blendemu
 export TIAOGENG_DIR=/path/to/tiaogeng
 ```
 
