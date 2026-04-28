@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+
+# Notebooks
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
+# Editor / agent state
+.vscode/
+.idea/
+.claude/
+**/.claude/
+.env
+.env.local
+
+# Local config overrides
+src/config_local.py
+
+# Working directories (local data, logs, plots, jobs, tests)
+data/
+output/
+logs/
+final_plots/
+jobs/
+tests/
+
+# OS
+.DS_Store
+Thumbs.db

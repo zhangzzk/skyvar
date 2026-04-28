@@ -4,17 +4,37 @@ import numpy as np
 # ==============================================================================
 # 1. PATHS & I/O
 # ==============================================================================
-BLENDING_EMULATOR_DIR = '/home/z/Zekang.Zhang/blending_emulator'
+# Paths are read from environment variables so the code is portable. Set them
+# in your shell (or in a .env loaded before import) before running:
+#
+#   SKYVAR_BASE_DIR        repo root (defaults to the parent of src/).
+#   SKYVAR_DATA_DIR        location for caches and large outputs.
+#   SKYVAR_SYS_PREDS_DIR   prediction/wtheta cache (defaults to <DATA_DIR>/sys_preds).
+#   SKYVAR_GAL_CAT         input galaxy catalog (FITS).
+#   SKYVAR_MODEL_JSON      XGBoost detection-classifier JSON.
+#   SKYVAR_BOUNDARY_NPY    classifier training-boundary array.
+#   BLENDING_EMULATOR_DIR  directory containing nz_utils / cosmic_toolbox.
+#   TIAOGENG_DIR           directory containing tiaogeng/codes/src and tiaogeng/data.
 
-BASE_DIR = '/home/z/Zekang.Zhang/skyvar/'
-PROJECT_DATA_DIR = '/project/ls-gruen/users/zekang.zhang/'
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_DEFAULT_BASE_DIR = os.path.dirname(_SRC_DIR)
+
+BASE_DIR = os.environ.get("SKYVAR_BASE_DIR", _DEFAULT_BASE_DIR)
+PROJECT_DATA_DIR = os.environ.get("SKYVAR_DATA_DIR", os.path.join(BASE_DIR, "data"))
+BLENDING_EMULATOR_DIR = os.environ.get("BLENDING_EMULATOR_DIR", "")
 
 PATHS = {
-    'gal_cat': os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
-    'model_json': "/home/z/Zekang.Zhang/optuna_study/models/classification_model_f24_rescaled_neighbor.json",
-    'boundary_npy': "/home/z/Zekang.Zhang/optuna_study/models/train_boundary_f24_cla_neighbor.npy",
+    'gal_cat': os.environ.get(
+        "SKYVAR_GAL_CAT",
+        os.path.join(PROJECT_DATA_DIR, "cats/galsbi/f24_0_r_ucat.gal.cat"),
+    ),
+    'model_json': os.environ.get("SKYVAR_MODEL_JSON", ""),
+    'boundary_npy': os.environ.get("SKYVAR_BOUNDARY_NPY", ""),
     'data_dir': os.path.join(BASE_DIR, "data"),
-    'sys_preds_dir': os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds"),
+    'sys_preds_dir': os.environ.get(
+        "SKYVAR_SYS_PREDS_DIR",
+        os.path.join(PROJECT_DATA_DIR, "proj2_sims/sys_preds"),
+    ),
 }
 
 
@@ -200,8 +220,10 @@ CLUSTERING_SETTINGS = {
 # End-to-end w(θ) measurement: GLASS mock catalogs + selection map + TreeCorr.
 DENSITY_SETTINGS = {
     # --- External code paths ---
+    # tiaogeng provides the GLASS mock-catalog generator; set TIAOGENG_DIR
+    # in the environment to point at your checkout.
     'external': {
-        'tiaogeng_path': '/home/z/Zekang.Zhang/tiaogeng',
+        'tiaogeng_path': os.environ.get("TIAOGENG_DIR", ""),
         'gls_filename': 'mock_gls.npy',
     },
 

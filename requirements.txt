@@ -1,0 +1,13 @@
+numpy
+scipy
+pandas
+matplotlib
+healpy
+astropy
+pyccl
+treecorr
+xgboost
+joblib
+psutil
+tqdm
+dustmaps
