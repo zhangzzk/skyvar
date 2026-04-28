@@ -1,4 +1,17 @@
-# skyvar
+```text
+   ·  ░ ▒ ░  ·  ▓ ░ ▒  ·  ░ ▓ ▒ ░  ·  ▒ ░ ▓  ·  ░ ▒ ░  ·  ▓ ░ ▒  ·
+
+       ███████╗██╗  ██╗██╗   ██╗██╗   ██╗ █████╗ ██████╗
+       ██╔════╝██║ ██╔╝╚██╗ ██╔╝██║   ██║██╔══██╗██╔══██╗
+       ███████╗█████╔╝  ╚████╔╝ ██║   ██║███████║██████╔╝
+       ╚════██║██╔═██╗   ╚██╔╝  ╚██╗ ██╔╝██╔══██║██╔══██╗
+       ███████║██║  ██╗   ██║    ╚████╔╝ ██║  ██║██║  ██║
+       ╚══════╝╚═╝  ╚═╝   ╚═╝     ╚═══╝  ╚═╝  ╚═╝╚═╝  ╚═╝
+
+   ·  ▒ ░ ▓  ·  ░ ▒ ░  ·  ▓ ░ ▒  ·  ░ ▓ ▒ ░  ·  ▒ ░ ▓  ·  ░ ▒ ░  ·
+```
+
+---
 
 Code for measuring and modelling the impact of spatially varying selection on
 the angular two-point function `w(θ)` and on tomographic redshift distributions
@@ -10,9 +23,8 @@ observing conditions, applies an XGBoost detection classifier, and quantifies
   - the **density variation** that selection imprints on `w(θ)` directly,
     measured against GLASS mock catalogs with TreeCorr.
 
-The math is in `docs/clustering_enhance.md` and `docs/systematics_model.md`.
-
-This is research code accompanying ongoing work; APIs are not stable.
+This is research code accompanying ongoing work; APIs are not stable. The
+companion paper (link to be added) gives the full derivations.
 
 
 ## Layout
@@ -28,7 +40,6 @@ src/nz_variation.py      clustering enhancement on measured maps
 src/data_variation.py    variants run on cached predictions
 src/utils.py             shared helpers (stats, redshift binning, paths)
 src/plotting.py          all matplotlib output
-docs/                    derivations and model notes
 ```
 
 

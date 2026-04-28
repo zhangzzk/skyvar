@@ -21,13 +21,14 @@ __pycache__/
 # Local config overrides
 src/config_local.py
 
-# Working directories (local data, logs, plots, jobs, tests)
+# Working directories (local data, logs, plots, jobs, tests, docs)
 data/
 output/
 logs/
 final_plots/
 jobs/
 tests/
+docs/
 
 # OS
 .DS_Store
