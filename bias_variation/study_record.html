@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SkyVar Bias-Variation Study Record</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --text: #17202a;
+      --muted: #657083;
+      --line: #d9dee7;
+      --accent: #1c6b6f;
+      --accent-soft: #e7f3f2;
+      --warn: #fff5df;
+      --code: #f0f3f7;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .page {
+      width: min(1040px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 32px 0 56px;
+    }
+
+    header {
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 22px;
+      padding-bottom: 22px;
+    }
+
+    h1, h2, h3 {
+      line-height: 1.2;
+      margin: 0;
+    }
+
+    h1 {
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      letter-spacing: 0;
+      max-width: 900px;
+    }
+
+    h2 {
+      font-size: 1.28rem;
+      margin-bottom: 12px;
+    }
+
+    h3 {
+      font-size: 1rem;
+      margin: 18px 0 8px;
+    }
+
+    p { margin: 0 0 12px; }
+
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    code {
+      background: var(--code);
+      border-radius: 4px;
+      padding: 0.1rem 0.28rem;
+      font-size: 0.92em;
+    }
+
+    pre {
+      background: #132027;
+      border-radius: 8px;
+      color: #eef6f7;
+      font-size: 0.88rem;
+      line-height: 1.45;
+      overflow-x: auto;
+      padding: 14px 16px;
+    }
+
+    ul, ol {
+      margin: 0 0 12px 1.25rem;
+      padding: 0;
+    }
+
+    li + li { margin-top: 6px; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: var(--panel);
+      margin: 10px 0 16px;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 10px 12px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: #edf1f4;
+      font-weight: 650;
+      width: 28%;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+
+    .muted { color: var(--muted); }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      background: var(--accent-soft);
+      border: 1px solid #bfdada;
+      border-radius: 999px;
+      color: #174c4f;
+      padding: 5px 10px;
+      font-size: 0.9rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+      padding: 18px;
+    }
+
+    .span-12 { grid-column: span 12; }
+    .span-6 { grid-column: span 6; }
+
+    .callout {
+      background: var(--warn);
+      border-left: 4px solid #9a5b00;
+      border-radius: 6px;
+      margin: 12px 0;
+      padding: 12px 14px;
+    }
+
+    @media (max-width: 820px) {
+      .page { width: min(100% - 24px, 1040px); }
+      .span-6 { grid-column: span 12; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <p class="muted">SkyVar extension note</p>
+      <h1>Bias Variation from Spatially Varying Selection</h1>
+      <div class="meta">
+        <span class="pill">Created: 2026-05-16</span>
+        <span class="pill">Updated: 2026-05-19</span>
+        <span class="pill">Status: SPS source-density caveat unresolved</span>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card span-12">
+        <h2>Current Goal</h2>
+        <p>
+          Extend SkyVar from spatially varying <code>n(z)</code> to spatially varying galaxy bias
+          with the same per-simulation-pixel population semantics as the n(z) workflow. The current
+          canonical path draws <code>n_pop</code> galaxies for each seen simulation pixel, attaches
+          systematics, runs the detection classifier, and accumulates unselected and selected
+          redshift-binned mean-bias maps.
+        </p>
+        <div class="callout">
+          The first 128/128 <code>n_pop=1,000,000</code> run is recorded as a
+          luminosity-proxy baseline, not the final science run. The SPS-mass path is
+          implemented, but the current GalSBI-SPS intrinsic source pool does not reproduce
+          the F24 post-quality-cut source density and should not be used as the production
+          <code>n_pop</code> density source until this is resolved.
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2>Current Caveats To Resolve</h2>
+        <ul>
+          <li><strong>SPS/F24 density mismatch:</strong> the F24 catalog gives <code>183.478 arcmin^-2</code> after the SkyVar quality cuts, while the one-pixel GalSBI-SPS intrinsic smoke gives <code>31.646 arcmin^-2</code> after the same cuts.</li>
+          <li><strong>Not a cap/footprint issue:</strong> the same SPS smoke has intrinsic GalSBI count density <code>177.313 arcmin^-2</code>, close to F24, but only <code>1494 / 8405</code> rows survive the quality cuts.</li>
+          <li><strong>Likely cause:</strong> the SPS intrinsic catalog is much fainter. In the smoke, r-band <code>int_mag</code> median is about <code>29.83</code>; in F24 it is about <code>26.65</code>. Most SPS rows fail <code>r &lt; 28</code>.</li>
+          <li><strong>API finding:</strong> GalSBI's Tortorelli+25 <code>mode="intrinsic"</code> API is valid, but the SPS plugin samples from the stellar-mass function with <code>z_sm_intp=None</code> and does not apply the F24-like apparent-magnitude preselection before writing the intrinsic catalog.</li>
+          <li><strong>Decision needed before production:</strong> either find/build a magnitude-limited SPS source-pool generation path that matches F24 after cuts, or use the F24 density for <code>n_pop</code> and use SPS only as the stellar-mass/bias property reservoir.</li>
+          <li><strong>Current code caveat:</strong> the latest selection path reads <code>n_pop</code> density from the source-table summary. That is correct for a density-faithful source table, but would currently propagate the low SPS post-cut density if used directly.</li>
+          <li><strong>Do not resurrect old pools:</strong> fixed-cap SPS pools are invalid for density calibration. Auto caps avoid intrinsic truncation, but they do not solve the SPS-vs-F24 post-cut density mismatch.</li>
+          <li><strong>F24 density diagnostic:</strong> when measuring F24 with <code>bias_variation.catalog density</code>, use <code>--quality-size-column int_r50_arcsec</code>, <code>SKYVAR_BIAS_SPS_QUALITY_SIZE_SCALE=1.0</code>, and <code>SKYVAR_BIAS_DENSITY_NSIDE=512</code> to match <code>src.selection</code>.</li>
+          <li><strong>Run policy:</strong> pause large SPS production/rerun jobs until the density policy is explicit in config and job tags. One-pixel SPS smoke validates plumbing only, not source-density calibration.</li>
+          <li><strong>Map interpretation:</strong> high-redshift selected bins still require selected-count or selected-weight masks before interpreting maximum selected-minus-unselected bias deltas.</li>
+        </ul>
+      </section>
+
+      <section class="card span-6">
+        <h2>Canonical Code Path</h2>
+        <ul>
+          <li><code>bias_variation/full_skyvar_bias.py</code>: full workflow and production entry point.</li>
+          <li><code>src.systematics</code>: builds native SkyVar systematics maps for the requested <code>nside</code>.</li>
+          <li><code>src.selection</code>: source of detection and optional selection cuts.</li>
+          <li><code>bias_variation/plotting.py</code>: profile plots, combined map panels, and pixel <code>b(z)</code> examples.</li>
+        </ul>
+      </section>
+
+      <section class="card span-6">
+        <h2>Bias Assignment</h2>
+        <ul>
+          <li>Production input catalog: GalSBI-SPS r-band source pool with <code>log10_surviv_stellar_mass</code>.</li>
+          <li>Mass source: <code>--mass-source sps_surviving</code> by default; luminosity proxy now requires explicit <code>--mass-source luminosity_proxy</code>.</li>
+          <li>SPS size convention: <code>r50 * 0.168</code> arcsec, passed through <code>--size-column r50 --size-scale 0.168</code>.</li>
+          <li>Halo relation: inverse Moster+13 SHMR with 0.15 dex scatter.</li>
+          <li>Halo bias: Tinker+10 through Colossus with <code>mdef=200c</code>.</li>
+        </ul>
+      </section>
+
+      <section class="card span-12">
+        <h2>SPS Mass Smoke Run</h2>
+        <table>
+          <tbody>
+            <tr>
+              <th>Slurm job</th>
+              <td><code>14162958</code>, completed with exit code <code>0:0</code> in 00:00:14.</td>
+            </tr>
+            <tr>
+              <th>Geometry</th>
+              <td><code>nside_sim=1024</code>, <code>nside_stats=256</code>, 8 randomly selected seen simulation pixels.</td>
+            </tr>
+            <tr>
+              <th>Population</th>
+              <td>Existing SPS smoke catalog: 8382 rows before cuts, 836 rows after cuts; <code>n_pop=2000</code> per processed sim pixel.</td>
+            </tr>
+            <tr>
+              <th>Rows</th>
+              <td>16,000 input draws, 3122 classified rows, 216 selected rows.</td>
+            </tr>
+            <tr>
+              <th>Map footprint</th>
+              <td>8 stats pixels active; 60 redshift bins over <code>0 &lt; z &lt; 2</code>.</td>
+            </tr>
+            <tr>
+              <th>Mass source</th>
+              <td><code>log10_column:log10_surviv_stellar_mass</code>; source diagnostics show SPS scatter rather than the old one-to-one luminosity proxy.</td>
+            </tr>
+            <tr>
+              <th>Output directory</th>
+              <td><code>bias_variation/output/full_skyvar_bias_small_spsmass_smoke</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          Job <code>14162955</code> failed before this because the SPS catalog uses
+          <code>r50</code>, not the old F24 <code>int_r50_arcsec</code>. The Slurm jobs now pass
+          <code>--size-column r50 --size-scale 0.168</code> explicitly.
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2>SPS Source Pool</h2>
+        <table>
+          <tbody>
+            <tr>
+              <th>Catalog</th>
+              <td><code>bias_variation/output/sps_source_pool/galsbi_sps_source_pool_0_r_ucat.gal.cat</code></td>
+            </tr>
+            <tr>
+              <th>Generation</th>
+              <td>Current generator uses GalSBI's own SPS stellar-mass-function count model and auto-computes density-faithful caps. Older fixed-cap pools are retained only as historical failures.</td>
+            </tr>
+            <tr>
+              <th>Rows</th>
+              <td>Fresh one-pixel SPS smoke: 8405 r-band rows before cuts and 1494 after cuts.</td>
+            </tr>
+            <tr>
+              <th>Mass and size</th>
+              <td><code>log10_surviv_stellar_mass</code> and <code>r50 * 0.168</code> arcsec.</td>
+            </tr>
+            <tr>
+              <th>Density</th>
+              <td>Unresolved. F24 gives <code>183.4783935861769 arcmin^-2</code> after cuts; current SPS intrinsic smoke gives <code>31.64565840757377 arcmin^-2</code> after cuts.</td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          Auto caps and compact summaries fix intrinsic truncation and bookkeeping.
+          They do not make Tortorelli+25 intrinsic SPS match the F24 source density after
+          <code>r &lt; 28</code>. Treat current SPS-density-derived <code>n_pop</code> as
+          unsafe for production until the magnitude-selection issue is resolved.
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2>SPS Production Run</h2>
+        <table>
+          <tbody>
+            <tr>
+              <th>Slurm job</th>
+              <td>Paused pending SPS/F24 source-density decision.</td>
+            </tr>
+            <tr>
+              <th>Configuration</th>
+              <td>Target geometry remains <code>nside_sim=128</code>, <code>nside_stats=128</code>, detection-only selection. The correct <code>n_pop</code> source is not yet finalized.</td>
+            </tr>
+            <tr>
+              <th>Source</th>
+              <td>Uses the SPS source-pool catalog above with <code>--mass-source sps_surviving</code>.</td>
+            </tr>
+            <tr>
+              <th>Output directory</th>
+              <td><code>bias_variation/output/full_skyvar_bias128_npop1m_spsmass</code></td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card span-12">
+        <h2>Luminosity-Proxy Baseline</h2>
+        <table>
+          <tbody>
+            <tr>
+              <th>Slurm job</th>
+              <td><code>14161044</code>, completed with exit code <code>0:0</code> in 01:56:09.</td>
+            </tr>
+            <tr>
+              <th>Resources</th>
+              <td>64 CPUs, 1024G memory, 48 hour wall time, <code>inter</code> partition.</td>
+            </tr>
+            <tr>
+              <th>Configuration</th>
+              <td><code>nside_sim=128</code>, <code>nside_stats=128</code>, <code>n_pop=1000000</code>, <code>chunk_size=16000000</code>, detection-only selection, luminosity-proxy mass.</td>
+            </tr>
+            <tr>
+              <th>Systematics</th>
+              <td>Native <code>nside=128</code> SkyVar map built by <code>src.systematics</code>; no resampling shortcut is used.</td>
+            </tr>
+            <tr>
+              <th>Progress</th>
+              <td>Processed all 6070 seen sim pixels in 380 chunks, with 6.07 billion total input draws.</td>
+            </tr>
+            <tr>
+              <th>Rows</th>
+              <td>1.915 billion classified rows; 334.2 million selected rows; 323.6 million selected rows in the redshift range.</td>
+            </tr>
+            <tr>
+              <th>Map footprint</th>
+              <td>6070 active stats pixels; all 364,200 pixel-z bins filled for both unselected and selected maps.</td>
+            </tr>
+            <tr>
+              <th>Median bias</th>
+              <td>Unselected 1.06565; selected 1.55813; median per-pixel selected-minus-unselected delta is about 0.484.</td>
+            </tr>
+            <tr>
+              <th>Extreme bins</th>
+              <td>Maximum selected-minus-unselected pixel-z delta is 57.44, from a high-z bin with only 24 selected objects and summed selected weight 10.83.</td>
+            </tr>
+            <tr>
+              <th>Output directory</th>
+              <td><code>/home/z/Zekang.Zhang/skyvar/bias_variation/output/full_skyvar_bias128_npop1m</code></td>
+            </tr>
+            <tr>
+              <th>Tag</th>
+              <td><code>full_skyvar_bias128_stats128_npop1m_detonly</code></td>
+            </tr>
+          </tbody>
+        </table>
+        <div class="callout">
+          This run completed the full SkyVar-style draw/classification/map workflow, but it used
+          <code>luminosity_proxy:abs_mag,M/L=1.0</code>. It is useful as a code and plotting
+          baseline only. The SPS-mass rerun should use
+          <code>bias_variation/output/full_skyvar_bias128_npop1m_spsmass</code>.
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2>Plot Policy</h2>
+        <p>
+          The map plotting path has been made consistent with the compact n(z)-style review flow.
+          Individual scalar map files are no longer the default output. The canonical map products
+          are combined panels with histogram mini-panels, global-reference markers, and
+          SkyVar-style HEALPix-resolution marker sizing.
+        </p>
+        <ul>
+          <li><code>*_map_medians_and_difference.png</code>: unselected median, selected median, and selected-minus-unselected bias.</li>
+          <li><code>*_map_object_counts_panel.png</code>: unselected counts, selected counts, and selected weight.</li>
+          <li><code>*_bias_profiles.png</code>: per-redshift pixel-median bias profiles and selected-minus-unselected profile.</li>
+          <li><code>*_pixel_bz_examples.png</code> and <code>.csv</code>: n(z)-style overlay with weighted global <code>b(z)</code> and all output-pixel <code>b(z)</code> curves, rebinned to 15 z bins for review by default.</li>
+        </ul>
+      </section>
+
+      <section class="card span-12">
+        <h2>Source Diagnostics</h2>
+        <p>
+          <code>bias_variation/full_skyvar_bias.py</code> now writes source-catalog scatter
+          diagnostics as part of the full workflow. The plot labels record whether
+          <code>M_*</code> came from SPS surviving mass, SPS formed mass, a custom mass column, or
+          the explicit luminosity proxy. Bias-versus-property panels use a linear bias axis.
+        </p>
+        <ul>
+          <li>Detailed source-property to bias note: <code>bias_variation/photometry_to_bias_relation.html</code>.</li>
+          <li>Active 128 SPS-mass bias versus photometric properties: <code>bias_variation/output/full_skyvar_bias128_npop1m_spsmass/full_skyvar_bias128_stats128_npop1m_spssurv_detonly_source_bias_vs_photometric_properties.png</code>.</li>
+          <li>Active 128 SPS-mass <code>M_*</code> versus photometric properties: <code>bias_variation/output/full_skyvar_bias128_npop1m_spsmass/full_skyvar_bias128_stats128_npop1m_spssurv_detonly_source_mstar_vs_photometric_properties.png</code>.</li>
+          <li>Active 128 SPS-mass <code>M_h</code> versus <code>M_*</code> and <code>M_h</code> versus bias: <code>bias_variation/output/full_skyvar_bias128_npop1m_spsmass/full_skyvar_bias128_stats128_npop1m_spssurv_detonly_source_mass_bias_relations.png</code>.</li>
+          <li>SPS smoke bias versus photometric properties: <code>bias_variation/output/full_skyvar_bias_small_spsmass_smoke/smoke_spssurv_sim1024_stats256_npop2k_pix8_detonly_source_bias_vs_photometric_properties.png</code>.</li>
+          <li>SPS smoke <code>M_*</code> versus photometric properties: <code>bias_variation/output/full_skyvar_bias_small_spsmass_smoke/smoke_spssurv_sim1024_stats256_npop2k_pix8_detonly_source_mstar_vs_photometric_properties.png</code>.</li>
+          <li>SPS smoke <code>M_h</code> versus <code>M_*</code> and <code>M_h</code> versus bias: <code>bias_variation/output/full_skyvar_bias_small_spsmass_smoke/smoke_spssurv_sim1024_stats256_npop2k_pix8_detonly_source_mass_bias_relations.png</code>.</li>
+        </ul>
+        <div class="callout">
+          The old proxy plot had a one-to-one <code>M_*</code>-absolute-magnitude relation by
+          construction. The SPS smoke plot is no longer deterministic in that panel, which verifies
+          that the source diagnostics are using actual SPS stellar mass.
+        </div>
+      </section>
+
+      <section class="card span-12">
+        <h2>Plot Review</h2>
+        <ul>
+          <li>The combined maps now use SkyVar-style pixel-size markers and no longer show artificial gaps between adjacent <code>nside=128</code> pixels.</li>
+          <li>The selected global <code>b(z)</code> rises strongly at high redshift. This is physically consistent with detection selecting the luminous/high-bias tail, but high-z per-pixel extrema should still be interpreted with selected-count and selected-weight cuts.</li>
+          <li>The 128/128 baseline source-property plots are internally consistent with the old luminosity-proxy model, but should not be used for science interpretation.</li>
+          <li>The SPS smoke source-property plots use <code>log10_surviv_stellar_mass</code>; <code>M_h</code> follows the SHMR inversion with scatter, and bias increases with <code>M_h</code> and redshift.</li>
+          <li>The map-level median-bias panels summarize each pixel by the median over redshift bins; the pixel <code>b(z)</code> overlay now includes all pixels and is the clearer plot for redshift-dependent global versus pixel behavior.</li>
+        </ul>
+      </section>
+
+      <section class="card span-12">
+        <h2>Toy and Shortcut Audit</h2>
+        <ul>
+          <li><strong>Removed from production default:</strong> luminosity-proxy stellar mass from <code>abs_mag</code>. It is now available only through explicit <code>--mass-source luminosity_proxy</code> diagnostic runs.</li>
+          <li><strong>Production default:</strong> <code>--mass-source sps_surviving</code>, requiring <code>log10_surviv_stellar_mass</code>. Missing SPS mass now fails loudly instead of falling back.</li>
+          <li><strong>Diagnostic only:</strong> old <code>bias64</code> random-pixel/resampling jobs and the representative-pixel SPS products. They are not equivalent to drawing <code>n_pop</code> galaxies per seen simulation pixel.</li>
+          <li><strong>Model assumption:</strong> 0.15 dex Gaussian scatter is applied to inferred halo mass after the Moster+13 inverse. This is kept explicit in summaries.</li>
+          <li><strong>Source-pool cap:</strong> The original SPS pool used explicit 50k blue/red caps and is not valid for density calibration. Current generation uses GalSBI-derived auto caps, but the post-cut density remains too low because the intrinsic SPS catalog is too faint relative to F24.</li>
+          <li><strong>Numerical approximation:</strong> SHMR inverse and Tinker+10 bias use interpolation grids by default; exact modes remain available for checks.</li>
+          <li><strong>SkyVar convention:</strong> source rows are sampled with replacement and assigned local synthetic <code>RA/DEC</code> per chunk to preserve source density for the blend classifier, matching the n(z)-style selection workflow.</li>
+          <li><strong>Plotting only:</strong> source-property scatter plots use a deterministic subsample for readability; maps and profiles use the accumulated full run.</li>
+          <li><strong>Unrelated old toy modules:</strong> <code>src/toy_variation.py</code> and the <code>nz_source=toy</code> option in <code>src/density_variation.py</code> are not part of the bias production path.</li>
+        </ul>
+      </section>
+
+      <section class="card span-12">
+        <h2>Run Commands</h2>
+        <pre><code># Reproduce the F24 post-cut density cross-check
+SKYVAR_BIAS_SPS_QUALITY_SIZE_SCALE=1.0 SKYVAR_BIAS_DENSITY_NSIDE=512 \
+  python -m bias_variation.catalog density \
+  --catalog /project/ls-gruen/users/zekang.zhang/cats/galsbi/f24_0_r_ucat.gal.cat \
+  --quality-size-column int_r50_arcsec --area-mode radec
+
+# Generate a GalSBI-SPS source pool for debugging only until the density policy is resolved
+sbatch jobs/run_bias_sps_source_pool.sh
+
+# Production 128/128 SPS-mass runs are paused until the source-density policy is explicit.</code></pre>
+      </section>
+
+      <section class="card span-12">
+        <h2>Storage Policy</h2>
+        <p>
+          Heavy non-plot products now live under
+          <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation</code>.
+          Local <code>bias_variation/output</code> is reserved for plots and compact
+          summaries used for inspection from the repo.
+        </p>
+        <ul>
+          <li>SPS source pool: <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation/sps_source_pool</code>.</li>
+          <li>1M-target SPS source pool: <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation/sps_source_pool_1m</code>.</li>
+          <li>Second seeded 1M-target SPS source pool: <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation/sps_source_pool_1m_seed20260519</code>.</li>
+          <li>Concatenated 2x1M SPS source pool: <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation/sps_source_pool_2x1m</code>.</li>
+          <li>5M-target SPS source pool: <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation/sps_source_pool_5m</code>.</li>
+          <li>128/1M SPS data products: <code>/project/ls-gruen/users/zekang.zhang/skyvar_bias_variation/full_skyvar_bias128_npop1m_spsmass</code>.</li>
+          <li>Raw prediction chunks are selection-ready: they include <code>detec_weight</code>, <code>r_obs_input_p</code>, <code>z_pho_input_p</code>, <code>tomo_p_*</code>, and <code>tomo_weight_*</code>.</li>
+          <li>Cached raw predictions can be reused with <code>--raw-preds-dir</code> and <code>--base-redshift-maps</code> to test selection or tomographic binning without rerunning source draws or XGBoost classification.</li>
+        </ul>
+      </section>
+
+      <section class="card span-12">
+        <h2>Open Caveats</h2>
+        <ul>
+          <li>The completed 128/128 run is a luminosity-proxy baseline. It should be replaced by an SPS-mass rerun before science interpretation.</li>
+          <li>The SPS smoke run is intentionally small and validates plumbing only; it exposed a real source-density mismatch with F24.</li>
+          <li>The active unresolved issue is whether production <code>n_pop</code> should come from a corrected magnitude-limited SPS catalog or from the F24 post-cut density.</li>
+          <li>The current Tortorelli+25 intrinsic SPS catalog should not be treated as an F24-density source catalog at <code>r &lt; 28</code>.</li>
+          <li>High-z selected bins still need selected-count or selected-weight masks before interpreting maximum deltas.</li>
+        </ul>
+      </section>
+
+      <section class="card span-12">
+        <h2>Next Steps</h2>
+        <ol>
+          <li>Decide the density policy: corrected magnitude-limited SPS source density, or F24 density with SPS as a property reservoir.</li>
+          <li>If using corrected SPS density, identify and smoke-test the correct GalSBI-SPS mode/config or custom filtering strategy that reproduces F24-like post-cut density.</li>
+          <li>If using F24 density, make that explicit in config/job names and prevent source-table summaries from silently overriding <code>n_pop</code> with low SPS post-cut density.</li>
+          <li>After the density policy is fixed, regenerate a multi-pixel SPS source pool and rerun the 128/128 SPS-mass workflow.</li>
+          <li>Add a plotting or summary mask for low selected-count or low selected-weight high-z bins before interpreting maximum deltas.</li>
+        </ol>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

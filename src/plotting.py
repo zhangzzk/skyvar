@@ -4,7 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import healpy as hp
 import pyccl as ccl
-from matplotlib.colors import Normalize
+from matplotlib.colors import Normalize, TwoSlopeNorm
 
 logger = logging.getLogger(__name__)
 
@@ -383,16 +383,21 @@ def _project_ra_values(lon, ra_range):
 
 def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
             ax=None, ra_range=None, dec_range=None, cbar_ax=None,
-            vmin=None, vmax=None, fig_width_in=None):
+            vmin=None, vmax=None, fig_width_in=None,
+            cmap=plt.cm.coolwarm, norm=None,
+            marker_area_scale=2.0):
     """Plot HEALPix map for seen pixels."""
     n_pix = hp.nside2npix(sys_nside)
     lon, lat = hp.pix2ang(sys_nside, np.arange(n_pix), lonlat=True)
 
-    if vmin is None or vmax is None:
-        vmin_, vmax_ = np.percentile(map_data[mask], [0.1, 99.9])
-        vmin = vmin if vmin is not None else vmin_
-        vmax = vmax if vmax is not None else vmax_
-    norm_scale = Normalize(vmin=vmin, vmax=vmax)
+    if norm is None:
+        if vmin is None or vmax is None:
+            vmin_, vmax_ = np.percentile(map_data[mask], [0.1, 99.9])
+            vmin = vmin if vmin is not None else vmin_
+            vmax = vmax if vmax is not None else vmax_
+        norm_scale = Normalize(vmin=vmin, vmax=vmax)
+    else:
+        norm_scale = norm
 
     if ax is None:
         plt.figure(figsize=(16, 2))
@@ -414,10 +419,10 @@ def plt_map(map_data, sys_nside, mask, label='value', save_path=None,
         fig_width_in = ax.get_figure().get_figwidth()
 
     marker_pts = pix_res_deg / ra_span * fig_width_in * 72
-    s = marker_pts ** 2 * 2
+    s = marker_pts ** 2 * marker_area_scale
 
     sc = ax.scatter(lon_plot[mask], lat[mask], c=map_data[mask], s=s,
-                    cmap=plt.cm.coolwarm, norm=norm_scale, edgecolors='none',
+                    cmap=cmap, norm=norm_scale, edgecolors='none',
                     marker='s', rasterized=True)
 
     if cbar_ax is not None:
@@ -772,7 +777,8 @@ def plot_systematics_histograms(maps, labels, mask, output_path):
     plt.savefig(output_path, dpi=150)
     plt.close()
 
-def _colorbar_histogram(ax, data, label, cmap=plt.cm.coolwarm, vmin=None, vmax=None):
+def _colorbar_histogram(ax, data, label, cmap=plt.cm.coolwarm,
+                        vmin=None, vmax=None, norm=None):
     """Integrated colorbar + histogram silhouette without style grid lines."""
     map_cfg = PLOT_CFG['map']
 
@@ -786,10 +792,12 @@ def _colorbar_histogram(ax, data, label, cmap=plt.cm.coolwarm, vmin=None, vmax=N
     centers = 0.5 * (edges[:-1] + edges[1:])
     y = counts
 
-    gradient = np.linspace(0, 1, 256).reshape(1, -1)
+    gradient_x = np.linspace(vmin, vmax, 256)
+    gradient = (norm(gradient_x) if norm is not None else np.linspace(0, 1, 256)).reshape(1, -1)
     ymax = max(float(np.max(y)), 1e-12) * 1.15
     ax.imshow(gradient, aspect='auto', cmap=cmap,
-              extent=[vmin, vmax, 0, ymax], origin='lower')
+              extent=[vmin, vmax, 0, ymax], origin='lower',
+              vmin=0, vmax=1)
     ax.fill_between(centers, 0, y, color='grey', alpha=0.45)
     ax.plot(centers, y, color='k', linewidth=map_cfg['hist_curve_lw'])
 
@@ -802,7 +810,9 @@ def _colorbar_histogram(ax, data, label, cmap=plt.cm.coolwarm, vmin=None, vmax=N
 
 def plot_systematics_overview(maps, labels, nside, mask, output_path,
                               ra_range=None, dec_range=None,
-                              hist_vlims=None):
+                              hist_vlims=None, cmaps=None,
+                              vcenters=None, extra_output_paths=None,
+                              marker_area_scale=2.0):
     """Plot maps with integrated colorbar-histogram panels."""
     n_maps = len(maps)
     n_pix = hp.nside2npix(nside)
@@ -819,6 +829,16 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
 
     if hist_vlims is None:
         hist_vlims = [None] * n_maps
+    if cmaps is None:
+        cmaps = [plt.cm.coolwarm] * n_maps
+    if len(cmaps) != n_maps:
+        raise ValueError(f"cmaps length must match maps length ({n_maps}), got {len(cmaps)}")
+    if vcenters is None:
+        vcenters = [None] * n_maps
+    if len(vcenters) != n_maps:
+        raise ValueError(f"vcenters length must match maps length ({n_maps}), got {len(vcenters)}")
+    if extra_output_paths is None:
+        extra_output_paths = []
 
     map_cfg = PLOT_CFG['map']
     map_frac = map_cfg['map_frac']
@@ -835,7 +855,7 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
 
     fig = plt.figure(figsize=(map_width_in, fig_h))
 
-    for i, (map_data, label) in enumerate(zip(maps, labels)):
+    for i, (map_data, label, cmap, vcenter) in enumerate(zip(maps, labels, cmaps, vcenters)):
         row_bottom = (margin_bot + (n_maps - 1 - i) * (row_h_in + vgap_in)) / fig_h
 
         ax_map = fig.add_axes([map_cfg['left'], row_bottom, map_frac, row_h_in / fig_h])
@@ -849,15 +869,27 @@ def plot_systematics_overview(maps, labels, nside, mask, output_path,
             vmin, vmax = hist_vlims[i]
         else:
             vmin, vmax = np.percentile(data, [0.1, 99.9])
+        if vcenter is None:
+            norm_scale = Normalize(vmin=vmin, vmax=vmax)
+        else:
+            if vcenter <= vmin:
+                vmin = vcenter - (vmax - vcenter)
+            elif vcenter >= vmax:
+                vmax = vcenter + (vcenter - vmin)
+            norm_scale = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
 
         plt_map(map_data, nside, mask, label=None, ax=ax_map,
                 ra_range=(ra_lo, ra_hi), dec_range=(dec_lo, dec_hi),
                 cbar_ax=None, vmin=vmin, vmax=vmax,
-                fig_width_in=map_width_in * map_frac)
+                fig_width_in=map_width_in * map_frac,
+                cmap=cmap, norm=norm_scale,
+                marker_area_scale=marker_area_scale)
 
-        _colorbar_histogram(ax_cb, data, label, vmin=vmin, vmax=vmax)
+        _colorbar_histogram(ax_cb, data, label, cmap=cmap,
+                            vmin=vmin, vmax=vmax, norm=norm_scale)
 
-    plt.savefig(output_path, dpi=map_cfg['dpi'], bbox_inches='tight')
+    for path in [output_path, *extra_output_paths]:
+        plt.savefig(path, dpi=map_cfg['dpi'], bbox_inches='tight')
     plt.close()
 
 

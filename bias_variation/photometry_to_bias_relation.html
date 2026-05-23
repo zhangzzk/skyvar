@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SkyVar Bias Workflow: Source Properties to Halo Bias</title>
+  <style>
+    :root {
+      --fg: #15171a;
+      --muted: #626b76;
+      --line: #d8dee6;
+      --bg: #f6f8fb;
+      --card: #ffffff;
+      --accent: #275f9f;
+      --warn: #8a5b00;
+      --code: #f0f3f7;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+    }
+    main {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 22px 48px;
+    }
+    header {
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+    }
+    h1, h2, h3 { line-height: 1.2; margin: 0 0 10px; }
+    h1 { font-size: 30px; }
+    h2 { font-size: 22px; margin-top: 28px; }
+    h3 { font-size: 17px; margin-top: 18px; }
+    p { margin: 8px 0 12px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: var(--code);
+      border-radius: 4px;
+    }
+    code { padding: 1px 4px; }
+    pre {
+      padding: 12px 14px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 10px 0 16px;
+      background: var(--card);
+      border: 1px solid var(--line);
+    }
+    th, td {
+      vertical-align: top;
+      text-align: left;
+      padding: 8px 10px;
+      border-bottom: 1px solid var(--line);
+    }
+    th { background: #eef3f9; font-weight: 650; }
+    tr:last-child td { border-bottom: 0; }
+    ul { margin: 8px 0 12px 22px; padding: 0; }
+    li { margin: 4px 0; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px 18px;
+      margin: 16px 0;
+    }
+    .callout {
+      border-left: 4px solid var(--accent);
+      background: #eef5fc;
+      padding: 10px 12px;
+      margin: 12px 0;
+    }
+    .warning {
+      border-left-color: var(--warn);
+      background: #fff8e6;
+    }
+    .muted { color: var(--muted); }
+    .math {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      background: #fbfcfe;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin: 10px 0;
+      overflow-x: auto;
+      white-space: nowrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    @media (max-width: 820px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>SkyVar Bias Workflow: Source Properties to Halo Bias</h1>
+    <p class="muted">
+      Created 2026-05-17. This note documents what the current
+      <code>bias_variation</code> code actually does when it assigns galaxy bias
+      and then turns those per-galaxy biases into unselected and selected
+      per-pixel <code>b(z)</code> maps.
+    </p>
+  </header>
+
+  <section class="card">
+    <h2>Scope</h2>
+    <p>
+      The active production path does <strong>not</strong> infer intrinsic galaxy
+      bias directly from apparent photometry. It assigns intrinsic bias from
+      SPS stellar mass and true redshift, then uses photometric and morphology
+      properties in the SkyVar/blending-emulator selection step. The selected
+      bias variation is therefore selection-induced: photometry changes which
+      biased galaxies survive, but the intrinsic per-galaxy bias is set by
+      <code>M_*</code>, <code>z</code>, SHMR, scatter, and Tinker/Colossus.
+    </p>
+    <p>
+      Main implementation files:
+      <a href="halo_bias.py"><code>halo_bias.py</code></a>,
+      <a href="shmr.py"><code>shmr.py</code></a>,
+      <a href="halo_bias.py"><code>halo_bias.py</code></a>,
+      <a href="catalog.py"><code>catalog.py</code></a>,
+      <a href="selection.py"><code>selection.py</code></a>, and
+      <code>src/selection.py</code>.
+    </p>
+  </section>
+
+  <section>
+    <h2>Active 128 SPS-Mass Configuration</h2>
+    <table>
+      <tr><th>Quantity</th><th>Active value</th></tr>
+      <tr><td>Source catalog</td><td>GalSBI-SPS source-pool choice is paused pending the SPS/F24 density decision.</td></tr>
+      <tr><td>Rows before / after quality cuts</td><td>Fresh one-pixel SPS smoke: <code>8405</code> / <code>1494</code>; this validates plumbing only and is not a production density calibration.</td></tr>
+      <tr><td>Mass source</td><td><code>--mass-source sps_surviving</code>, using <code>log10_surviv_stellar_mass</code>.</td></tr>
+      <tr><td>Angular size convention</td><td><code>--size-column r50 --size-scale 0.168</code>, so <code>Re = 0.168 r50</code> arcsec before semimajor conversion.</td></tr>
+      <tr><td>Bias relation</td><td>Moster+13 inverse SHMR, <code>0.15 dex</code> scatter in <code>log10 M_h</code>, Tinker+10 halo bias through Colossus.</td></tr>
+      <tr><td>Cosmology</td><td><code>h=0.6736</code>, <code>Omega_c=0.2645</code>, <code>Omega_b=0.0493</code>, <code>sigma8=0.8111</code>, <code>n_s=0.9649</code>.</td></tr>
+      <tr><td>Mass definition</td><td><code>mdef=200c</code>.</td></tr>
+      <tr><td>Simulation setup</td><td><code>nside_sim=128</code>, <code>nside_stats=128</code>; production <code>n_pop</code> policy is paused pending the SPS/F24 density decision.</td></tr>
+      <tr><td>Redshift map bins</td><td><code>60</code> bins over <code>0 &lt;= z &lt; 2</code>.</td></tr>
+      <tr><td>Selection mode</td><td><code>none</code>: detection threshold only, with <code>detection &gt; 0.1</code>.</td></tr>
+      <tr><td>Source density caveat</td><td>F24 gives <code>183.4783935861769 arcmin^-2</code> after quality cuts. The current GalSBI-SPS intrinsic smoke gives only <code>31.64565840757377 arcmin^-2</code> after the same cuts, so SPS-derived density is not yet safe for production <code>n_pop</code>.</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Catalog Standardization</h2>
+    <p>
+      The source HDF5 table is loaded, standardized, quality-cut, then passed to
+      the bias assignment. In the active SPS run, the requested source columns
+      include <code>z</code>, <code>int_mag</code>, <code>abs_mag</code>,
+      <code>sersic_n</code>, <code>e1</code>, <code>e2</code>,
+      <code>log10_surviv_stellar_mass</code>, and <code>r50</code>.
+    </p>
+    <table>
+      <tr><th>Standardized field</th><th>Code operation</th></tr>
+      <tr><td><code>redshift</code></td><td><code>z</code> is renamed to <code>redshift</code>.</td></tr>
+      <tr><td><code>r</code></td><td><code>int_mag</code> is renamed to apparent <code>r</code>.</td></tr>
+      <tr><td><code>Re</code></td><td>If <code>--size-column r50 --size-scale 0.168</code>, then <code>Re = 0.168 r50</code>.</td></tr>
+      <tr><td><code>BA</code></td><td>Computed from ellipticity if absent.</td></tr>
+      <tr><td><code>angle</code></td><td><code>0.5 atan2(e2,e1) / pi * 180 + 90</code>.</td></tr>
+      <tr><td><code>Re_semimajor</code></td><td><code>Re / sqrt(BA)</code>, with <code>BA</code> clipped below by <code>1e-8</code> inside the square root.</td></tr>
+    </table>
+    <div class="math">
+      ell = sqrt(e1^2 + e2^2), clipped to [0, 0.999999999]<br>
+      BA = sqrt((1 - ell) / (1 + ell))<br>
+      Re_semimajor = Re / sqrt(max(BA, 1e-8))
+    </div>
+    <p>Quality cuts are applied before bias assignment:</p>
+    <div class="math">
+      0.05 &lt; BA &lt; 1.0<br>
+      0 &lt; r &lt; 28<br>
+      0.01 &lt; Re_semimajor &lt; 5.0<br>
+      0.5 &lt; sersic_n &lt; 6.0
+    </div>
+  </section>
+
+  <section>
+    <h2>Stellar-Mass Input</h2>
+    <p>
+      The active path uses the SPS surviving stellar mass. The code converts
+      the logarithmic SPS column to a linear mass in solar masses:
+    </p>
+    <div class="math">
+      M_* = 10^(log10_surviv_stellar_mass) [M_sun]
+    </div>
+    <p>
+      The output diagnostic label for this path is
+      <code>log10_column:log10_surviv_stellar_mass</code>. If the requested
+      column is missing, the code raises an error. It does not silently fall
+      back to a proxy.
+    </p>
+    <h3>Other explicit mass-source modes</h3>
+    <table>
+      <tr><th><code>mass_source</code></th><th>Meaning</th></tr>
+      <tr><td><code>sps_surviving</code></td><td>Use <code>log10_surviv_stellar_mass</code>. This is the active production default.</td></tr>
+      <tr><td><code>sps_formed</code></td><td>Use <code>log10_stellar_mass</code>.</td></tr>
+      <tr><td><code>log_column</code></td><td>Use a user-provided logarithmic mass column from <code>--log-stellar-mass-column</code>.</td></tr>
+      <tr><td><code>linear_column</code></td><td>Use a user-provided linear mass column from <code>--stellar-mass-column</code>.</td></tr>
+      <tr><td><code>luminosity_proxy</code></td><td>Diagnostic-only old proxy from absolute magnitude.</td></tr>
+    </table>
+    <div class="warning callout">
+      The old luminosity proxy is still available only when explicitly requested.
+      It is not the production default. Its formula is
+      <code>M_* = (M*/L_r) 10^[-0.4 (M_r - M_sun,r)]</code> with
+      <code>M_sun,r = 4.65</code> and <code>M*/L_r = 1.0</code> by default.
+    </div>
+  </section>
+
+  <section>
+    <h2>Moster+13 SHMR Inversion</h2>
+    <p>
+      The code uses the Moster et al. 2013 stellar-to-halo mass relation as a
+      median forward relation and numerically inverts it to obtain
+      <code>log10_mhalo_median</code>.
+    </p>
+    <h3>Redshift-dependent parameters</h3>
+    <div class="math">
+      a = 1 / (1 + z)<br>
+      log10 M1(z) = M10 + M11 (1 - a)<br>
+      N(z) = N10 + N11 (1 - a)<br>
+      beta(z) = beta10 + beta11 (1 - a)<br>
+      gamma(z) = gamma10 + gamma11 (1 - a)
+    </div>
+    <table>
+      <tr><th>Parameter</th><th>Value</th></tr>
+      <tr><td><code>M10</code></td><td><code>11.590</code></td></tr>
+      <tr><td><code>M11</code></td><td><code>1.195</code></td></tr>
+      <tr><td><code>N10</code></td><td><code>0.0351</code></td></tr>
+      <tr><td><code>N11</code></td><td><code>-0.0247</code></td></tr>
+      <tr><td><code>beta10</code></td><td><code>1.376</code></td></tr>
+      <tr><td><code>beta11</code></td><td><code>-0.826</code></td></tr>
+      <tr><td><code>gamma10</code></td><td><code>0.608</code></td></tr>
+      <tr><td><code>gamma11</code></td><td><code>0.329</code></td></tr>
+    </table>
+    <h3>Forward relation</h3>
+    <div class="math">
+      M1 = 10^(log10 M1)<br>
+      x = M_h / M1<br>
+      M_*(M_h,z) = 2 N(z) M_h / [x^(-beta(z)) + x^(gamma(z))]
+    </div>
+    <p>
+      All masses in the SHMR module are numeric solar masses. There is no hidden
+      <code>h</code> conversion in the SHMR step.
+    </p>
+    <h3>Default inverse mode: interpolation</h3>
+    <p>
+      The active default is <code>inverse_mode="interp"</code>. The code keeps
+      only objects with finite positive <code>M_*</code> and finite
+      <code>z &gt;= 0</code>. It then:
+    </p>
+    <ul>
+      <li>Builds <code>80</code> redshift nodes from the minimum to maximum valid source redshift.</li>
+      <li>Assigns each galaxy to the nearest redshift node.</li>
+      <li>Builds a halo grid in <code>log10 M_h</code> from <code>8.0</code> to <code>16.5</code> with <code>2048</code> points.</li>
+      <li>Evaluates the Moster+13 forward relation on that grid at each redshift node.</li>
+      <li>Uses one-dimensional <code>np.interp</code> in <code>log10 M_*</code> to recover <code>log10 M_h</code>.</li>
+      <li>Returns <code>NaN</code> outside the interpolation range.</li>
+    </ul>
+    <h3>Exact inverse mode</h3>
+    <p>
+      The exact alternative uses <code>scipy.optimize.brentq</code> on
+      <code>log10 M_h</code> over <code>[8.0, 16.5]</code>, with
+      <code>xtol=1e-5</code>, <code>rtol=1e-5</code>, and
+      <code>maxiter=100</code>. It is not the active production mode.
+    </p>
+  </section>
+
+  <section>
+    <h2>Halo-Mass Scatter</h2>
+    <p>
+      After the median SHMR inversion, the code applies additive Gaussian
+      scatter in <code>log10 M_h</code>:
+    </p>
+    <div class="math">
+      log10 M_h = log10 M_h,median + epsilon<br>
+      epsilon ~ Normal(0, scatter_dex)<br>
+      scatter_dex = 0.15
+    </div>
+    <p>
+      The RNG seed is <code>20260516</code> in the active run. The scatter is
+      deterministic for a fixed source table order and seed. If
+      <code>scatter_dex &lt;= 0</code>, the code returns the median halo mass
+      without scatter.
+    </p>
+    <p>
+      The linear halo mass stored for Colossus is then:
+    </p>
+    <div class="math">
+      mhalo_msun = 10^(log10_mhalo)
+    </div>
+  </section>
+
+  <section>
+    <h2>Tinker+10 Halo Bias</h2>
+    <p>
+      The per-galaxy bias column is <code>bias_tinker10</code>. It is computed
+      with <code>colossus.lss.bias.haloBias</code> using the Tinker+10 model.
+      The SHMR mass is in numeric <code>M_sun</code>; Colossus expects
+      <code>M_sun / h</code>, so the adapter multiplies by <code>h</code>:
+    </p>
+    <div class="math">
+      M_colossus = M_h [M_sun] * h<br>
+      bias_tinker10 = haloBias(M_colossus, z, mdef="200c", model="tinker10")
+    </div>
+    <h3>Cosmology registered in Colossus</h3>
+    <table>
+      <tr><th>Colossus parameter</th><th>Value</th></tr>
+      <tr><td><code>flat</code></td><td><code>True</code></td></tr>
+      <tr><td><code>H0</code></td><td><code>67.36</code></td></tr>
+      <tr><td><code>Om0</code></td><td><code>0.3138</code> = <code>Omega_c + Omega_b</code></td></tr>
+      <tr><td><code>Ob0</code></td><td><code>0.0493</code></td></tr>
+      <tr><td><code>sigma8</code></td><td><code>0.8111</code></td></tr>
+      <tr><td><code>ns</code></td><td><code>0.9649</code></td></tr>
+    </table>
+    <h3>Default bias mode: interpolation</h3>
+    <p>
+      The active default is <code>bias_mode="interp"</code>. For valid objects
+      with finite positive halo mass and finite <code>z &gt;= 0</code>, the code:
+    </p>
+    <ul>
+      <li>Builds <code>80</code> redshift nodes over the valid source redshift range.</li>
+      <li>Assigns each galaxy to the nearest redshift node.</li>
+      <li>Builds a <code>2048</code>-point <code>log10 M_h</code> grid from <code>max(6.0, min(logM)-0.1)</code> to <code>min(17.5, max(logM)+0.1)</code>.</li>
+      <li>Evaluates Colossus <code>haloBias</code> on the grid at each redshift node.</li>
+      <li>Interpolates linearly from <code>log10 M_h</code> to bias.</li>
+      <li>Returns <code>NaN</code> outside the grid.</li>
+    </ul>
+    <p>
+      The exact mode calls Colossus directly per valid object. It is available
+      but is not the active production mode.
+    </p>
+  </section>
+
+  <section>
+    <h2>Per-Galaxy Output Columns</h2>
+    <table>
+      <tr><th>Column</th><th>Meaning</th></tr>
+      <tr><td><code>log10_mstar</code></td><td><code>log10(M_*)</code> from the configured mass source.</td></tr>
+      <tr><td><code>mstar_source</code></td><td>String label, for example <code>log10_column:log10_surviv_stellar_mass</code>.</td></tr>
+      <tr><td><code>log10_mhalo_median</code></td><td>Median inverse-Moster halo mass before scatter.</td></tr>
+      <tr><td><code>log10_mhalo</code></td><td>Scattered halo mass in log10 solar masses.</td></tr>
+      <tr><td><code>mhalo_msun</code></td><td><code>10^(log10_mhalo)</code>.</td></tr>
+      <tr><td><code>bias_tinker10</code></td><td>Tinker+10 halo bias from Colossus, after the mass conversion above.</td></tr>
+    </table>
+    <p>
+      The compact source table passed into the SkyVar pixel simulation keeps
+      <code>sersic_n</code>, <code>r</code>, <code>Re</code> where
+      <code>Re</code> is actually <code>Re_semimajor</code>, <code>redshift</code>,
+      <code>BA</code>, <code>angle</code>, and <code>bias_tinker10</code>.
+    </p>
+  </section>
+
+  <section>
+    <h2>How Photometry Enters Selected Bias Maps</h2>
+    <p>
+      Once every source-row has an intrinsic <code>bias_tinker10</code>, the
+      workflow simulates SkyVar pixels in the same style as the n(z) workflow.
+      For each simulation pixel, <code>n_pop</code> source rows are drawn with
+      replacement from the compact source table.
+    </p>
+    <h3>Pixel-level modification of apparent properties</h3>
+    <ul>
+      <li>The pixel id is set to the simulation HEALPix pixel.</li>
+      <li>The systematics maps set local <code>psf_fwhm</code> and <code>pixel_rms</code>.</li>
+      <li>The Galactic/extinction map shifts apparent magnitude: <code>r = r + galactic_map[pixel]</code>.</li>
+      <li>Objects with shifted <code>r &gt; detec_mag_bound</code>, with <code>detec_mag_bound = 26.0</code>, are marked <code>beyond_detec_bound</code> and skipped as classifier primaries.</li>
+      <li>SNR is precomputed from magnitude, size, PSF, noise, zero point, and pixel scale.</li>
+    </ul>
+    <div class="math">
+      flux = 10^[-0.4 (r - zero_point)]<br>
+      sigma_gal = Re / 1.678<br>
+      sigma_psf = psf_fwhm / 2.355<br>
+      sigma_eff^2 = sigma_gal^2 + sigma_psf^2<br>
+      n_eff = 4 pi sigma_eff^2 / pixel_size^2<br>
+      snr = flux / (pixel_rms sqrt(n_eff))
+    </div>
+    <h3>Classifier and detection probability</h3>
+    <p>
+      The workflow calls <code>nz_utils.icat2cla_v2</code>. That function builds
+      primary-secondary neighbor features with <code>cla_k=2</code>, marks a
+      source as neighbored only when the nearest secondary is within
+      <code>R_MAX_CLA = 3/3600 deg</code>, converts distance to arcsec, applies
+      <code>data_utils.rescale_v2</code>, and evaluates the XGBoost model to
+      produce the <code>detection</code> probability.
+    </p>
+    <p>
+      The classified catalog keeps the primary bias as
+      <code>bias_tinker10_input_p</code>. The classifier does not recompute the
+      bias; it carries the preassigned primary bias through the selection step.
+    </p>
+    <h3>Current selection</h3>
+    <p>
+      In the active run, <code>selection_mode="none"</code>, which means:
+    </p>
+    <div class="math">
+      keep if detection &gt; 0.1
+    </div>
+    <p>
+      Observed magnitude and photo-z scatter are still computed after the
+      detection threshold. They matter for optional <code>snr</code> or
+      <code>maglim</code> selections, but those are not active in the 128 SPS-mass
+      production run.
+    </p>
+    <h3>Photo-z and MagLim formulas for optional modes</h3>
+    <div class="math">
+      sigma_m = 2.5 / ln(10) / snr<br>
+      r_obs = r + Normal(0, sigma_m)<br>
+      dm = 2.5 log10[(pixel_rms / rms_ref) (psf_fwhm / psf_fwhm_ref)^2]<br>
+      k = 10^[alpha (r - m_ref + dm)]<br>
+      sigma_pho_scaled = sigma_pho k<br>
+      sigma_z = sqrt(sigma_pho_scaled^2 + sigma_int^2)<br>
+      z_pho = z_true + Normal(0, sigma_z)
+    </div>
+    <table>
+      <tr><th>Photo-z / selection parameter</th><th>Value</th></tr>
+      <tr><td><code>sigma_pho</code></td><td><code>0.0376</code></td></tr>
+      <tr><td><code>sigma_int</code></td><td><code>0.0212</code></td></tr>
+      <tr><td><code>alpha</code></td><td><code>0.4</code></td></tr>
+      <tr><td><code>m_ref</code></td><td><code>21</code></td></tr>
+      <tr><td><code>rms_ref</code></td><td><code>6.0</code></td></tr>
+      <tr><td><code>psf_fwhm_ref</code></td><td><code>0.7 arcsec</code></td></tr>
+      <tr><td><code>snr_min</code></td><td><code>5</code>, only for <code>selection_mode="snr"</code>.</td></tr>
+      <tr><td><code>maglim</code></td><td>Only for <code>selection_mode="maglim"</code>: <code>r_obs &lt; 4 z_pho + 18.7</code> and <code>r_obs &gt; 17</code>.</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Map Aggregation</h2>
+    <p>
+      Bias maps are accumulated in redshift bins and statistics HEALPix pixels.
+      If <code>nside_sim</code> and <code>nside_stats</code> differ, simulation
+      pixels are remapped to statistics pixels by HEALPix pixel centers.
+    </p>
+    <h3>Unselected mean bias</h3>
+    <p>
+      The unselected map uses all simulated source draws that lie inside the
+      redshift grid and have finite bias:
+    </p>
+    <div class="math">
+      b_unselected(p,k) = [sum_i b_i] / [sum_i 1]<br>
+      i in pixel p and redshift bin k
+    </div>
+    <h3>Selected mean bias</h3>
+    <p>
+      The selected map uses classifier-selected galaxies and weights by
+      detection probability:
+    </p>
+    <div class="math">
+      b_selected(p,k) = [sum_i detection_i b_i] / [sum_i detection_i]<br>
+      i in selected galaxies in pixel p and redshift bin k
+    </div>
+    <p>
+      The stored delta map is:
+    </p>
+    <div class="math">
+      delta_b(p,k) = b_selected(p,k) - b_unselected(p,k)
+    </div>
+    <p>
+      Count and sum-weight maps are stored beside the mean maps:
+      <code>count_unselected_z</code>, <code>count_selected_z</code>,
+      <code>sum_weight_unselected_z</code>, and
+      <code>sum_weight_selected_z</code>.
+    </p>
+  </section>
+
+  <section>
+    <h2>What the Source-Property Plots Show</h2>
+    <p>
+      The source-property diagnostic plots are made immediately after the
+      per-source bias assignment, before the expensive pixel classification
+      loop. They show the source catalog relation between assigned bias,
+      assigned stellar mass, photometric properties, and morphology. For large
+      catalogs they use a deterministic subsample for readability.
+    </p>
+    <ul>
+      <li><code>*_source_bias_vs_photometric_properties.png</code>: linear-y scatter of <code>bias_tinker10</code> versus <code>r</code>, <code>abs_mag</code>, <code>redshift</code>, <code>Re_semimajor</code>, <code>sersic_n</code>, and <code>BA</code>.</li>
+      <li><code>*_source_mstar_vs_photometric_properties.png</code>: the same x axes against <code>log10_mstar</code>.</li>
+      <li><code>*_source_mass_bias_relations.png</code>: <code>log10 M_h</code> versus <code>log10 M_*</code>, and <code>bias_tinker10</code> versus <code>log10 M_h</code>.</li>
+    </ul>
+    <p>
+      These plots do not require rerunning selection. They only require the
+      source catalog and the bias-assignment chain.
+    </p>
+  </section>
+
+  <section>
+    <h2>Important Caveats</h2>
+    <ul>
+      <li><strong>Source-density blocker:</strong> the current GalSBI-SPS intrinsic catalog is too faint relative to F24 for the <code>r &lt; 28</code> SkyVar source cuts. F24 has r-band <code>int_mag</code> median about <code>26.65</code>; the one-pixel SPS smoke has median about <code>29.83</code>.</li>
+      <li><strong>Production density decision pending:</strong> either find/build a magnitude-limited SPS generation path that reproduces F24 post-cut density, or use F24 density for <code>n_pop</code> and SPS only for stellar-mass and bias properties.</li>
+      <li>The current science path uses actual SPS surviving stellar mass. Apparent photometry is not converted to mass except in explicitly requested diagnostic luminosity-proxy runs.</li>
+      <li>The <code>0.15 dex</code> scatter is a modeling choice, not an SPS measurement.</li>
+      <li>The default SHMR and bias paths are interpolation approximations. Exact modes exist but are slower and are not the active production settings.</li>
+      <li>The source catalog after cuts should be regenerated after the source-density decision. Old fixed-cap source pools are not valid for density calibration.</li>
+      <li>Selected high-redshift bins should be interpreted with selected-count and selected-weight masks, because small selected weights can amplify noisy extrema.</li>
+      <li>The classifier determines detection/selection and can induce photometry-dependent bias variation by preferentially selecting galaxies of different redshift, stellar mass, halo mass, and bias.</li>
+    </ul>
+  </section>
+</main>
+</body>
+</html>

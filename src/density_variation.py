@@ -1,5 +1,6 @@
 import os
 import sys
+import argparse
 import logging
 from dataclasses import dataclass
 from importlib import import_module
@@ -41,11 +42,19 @@ SYS_NSIDE = int(SIM_CFG["sys_nside_stats"])
 _MEASURED_NZ_CACHE: dict = {}
 
 
-def _normalize_selection_mode(mode):
-    if mode is None:
-        return None
-    mode = str(mode).strip().lower()
-    return None if mode in ("", "none") else mode
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the SkyVar density variation pipeline")
+    parser.add_argument(
+        "--selection-mode", dest="selection_mode",
+        choices=("none", "snr", "maglim"), default="none",
+        help="Post-detection galaxy selection (default: none)",
+    )
+    parser.add_argument(
+        "--nz-source", dest="nz_source",
+        choices=("toy", "measured"), default="measured",
+        help="n(z) source for GLASS mock catalogs (default: measured)",
+    )
+    return parser
 
 
 @dataclass(frozen=True)
@@ -63,7 +72,7 @@ class DensityWThetaResult:
     w_theory: np.ndarray = None
 
 
-def _density_cache_tag() -> str:
+def _density_cache_tag(nz_source: str) -> str:
     fp = config.SYSTEMATICS_CONFIG["footprint"]
     size_deg = float(config.SYSTEMATICS_CONFIG["tiles"]["size_deg"])
     ra0, ra1 = float(fp["ra_range"][0]) % 360.0, float(fp["ra_range"][1]) % 360.0
@@ -72,14 +81,13 @@ def _density_cache_tag() -> str:
     n_arcmin2 = float(MOCK_CFG["n_arcmin2"])
     z0 = float(MOCK_CFG.get("gaussian_mean", 0.6))
     sig = float(MOCK_CFG.get("gaussian_sigma", 0.23))
-    source = str(MOCK_CFG.get("nz_source", "toy")).strip().lower()
 
     return (
         f"nside{nside}_narcmin{str(n_arcmin2).replace('.', 'p')}"
         f"_tile{str(size_deg).replace('.', 'p')}"
         f"_ra{str(ra0).replace('.', 'p')}_{str(ra1).replace('.', 'p')}"
         f"_dec{str(dec0).replace('.', 'p')}_{str(dec1).replace('.', 'p')}"
-        f"_nz{source}_m{str(z0).replace('.', 'p')}_s{str(sig).replace('.', 'p')}"
+        f"_nz{nz_source}_m{str(z0).replace('.', 'p')}_s{str(sig).replace('.', 'p')}"
     )
 
 
@@ -108,8 +116,8 @@ def _load_gls(gls_path: str):
 
 
 
-def _build_nz_for_glass(z_glass: np.ndarray) -> np.ndarray:
-    """Build the n(z) to feed GLASS, dispatching on MOCK_CFG['nz_source'].
+def _build_nz_for_glass(z_glass: np.ndarray, nz_source: str) -> np.ndarray:
+    """Build the n(z) to feed GLASS, dispatching on *nz_source*.
 
     Supported modes
     ---------------
@@ -117,9 +125,7 @@ def _build_nz_for_glass(z_glass: np.ndarray) -> np.ndarray:
     'measured' : Computed from the predictions file with detection threshold
                  and SNR cut applied, interpolated onto *z_glass*.
     """
-    source = str(MOCK_CFG.get("nz_source", "toy")).strip().lower()
-
-    if source == "toy":
+    if nz_source == "toy":
         dz = (z_glass[-1] - z_glass[0]) / z_glass.size
         z0 = float(MOCK_CFG.get("gaussian_mean", 0.6))
         sig = float(MOCK_CFG.get("gaussian_sigma", 0.23))
@@ -128,7 +134,7 @@ def _build_nz_for_glass(z_glass: np.ndarray) -> np.ndarray:
         logger.info("nz_source=toy  (z0=%.3f, sigma=%.3f)", z0, sig)
         return dndz
 
-    if source == "measured":
+    if nz_source == "measured":
         if "z" not in _MEASURED_NZ_CACHE or "dndz" not in _MEASURED_NZ_CACHE:
             raise RuntimeError(
                 "nz_source='measured' but _MEASURED_NZ_CACHE is empty. "
@@ -150,10 +156,10 @@ def _build_nz_for_glass(z_glass: np.ndarray) -> np.ndarray:
         )
         return dndz
 
-    raise ValueError(f"Unknown nz_source='{source}'. Choose 'toy' or 'measured'.")
+    raise ValueError(f"Unknown nz_source='{nz_source}'. Choose 'toy' or 'measured'.")
 
 
-def _build_mock_catalogs(glasscat: str, glasscat_rand: str) -> None:
+def _build_mock_catalogs(glasscat: str, glasscat_rand: str, nz_source: str) -> None:
     """Generate GLASS data/random catalogs from current config."""
     nside = int(MOCK_CFG["glass_nside"])
     n_arcmin2 = float(MOCK_CFG["n_arcmin2"])
@@ -167,7 +173,7 @@ def _build_mock_catalogs(glasscat: str, glasscat_rand: str) -> None:
     z_max = float(ANA_CFG.get("z_max", 2.0))
     glass_z_nbins = int(MOCK_CFG.get("glass_z_nbins", 201))
     z = np.linspace(z_min, z_max, glass_z_nbins)
-    dndz = _build_nz_for_glass(z)
+    dndz = _build_nz_for_glass(z, nz_source)
 
     tiaogeng_path = DEN_CFG["external"]["tiaogeng_path"]
     gls_filename = DEN_CFG["external"]["gls_filename"]
@@ -198,9 +204,9 @@ def _build_mock_catalogs(glasscat: str, glasscat_rand: str) -> None:
 
 
 
-def load_mock_catalogs() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def load_mock_catalogs(nz_source: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Load glass data/random catalogs from configured cache path and tag."""
-    tag = _density_cache_tag()
+    tag = _density_cache_tag(nz_source)
     base = config.PATHS["sys_preds_dir"]
     glasscat = os.path.join(base, f"glass_testgalcat_density_{tag}.fits")
     glasscat_rand = os.path.join(base, f"glass_testgalcat_rand_density_{tag}.fits")
@@ -208,7 +214,7 @@ def load_mock_catalogs() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray
 
     os.makedirs(base, exist_ok=True)
     if (not reuse) or (not os.path.exists(glasscat)) or (not os.path.exists(glasscat_rand)):
-        _build_mock_catalogs(glasscat, glasscat_rand)
+        _build_mock_catalogs(glasscat, glasscat_rand, nz_source)
 
     with fits.open(glasscat) as h:
         lon = h[1].data["RA"]
@@ -372,6 +378,7 @@ def measure_wtheta(
 def compute_theory_curve(
     theta_min_arcmin: float,
     theta_max_arcmin: float,
+    nz_source: str,
     n_theta: int = 200,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute theory w(theta) from the same n(z) used for the mock catalogs.
@@ -380,7 +387,7 @@ def compute_theory_curve(
     z_max = float(ANA_CFG.get("z_max", 2.0))
     glass_z_nbins = int(MOCK_CFG.get("glass_z_nbins", 201))
     z = np.linspace(z_min, z_max, glass_z_nbins)
-    dndz = _build_nz_for_glass(z)
+    dndz = _build_nz_for_glass(z, nz_source)
 
     cosmo = clustering.build_pyccl_cosmology()
     bias_val = float(MOCK_CFG.get("bias", 1.0))
@@ -477,13 +484,14 @@ def _build_maps_from_chunks(sel_mode, need_measured_nz):
 
 
 def main() -> None:
+    args = build_parser().parse_args()
+    sel_mode = None if args.selection_mode == "none" else args.selection_mode
+    nz_source = args.nz_source
+
     logging.basicConfig(
         level=getattr(logging, SIM_CFG.get("log_level", "INFO")),
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
-
-    sel_mode = _normalize_selection_mode(MOCK_CFG.get("selection_mode", None))
-    nz_source = str(MOCK_CFG.get("nz_source", "toy")).strip().lower()
 
     # 0. Stream prediction chunks → mean_p map (+ optional measured n(z)).
     mean_p, measured_nz = _build_maps_from_chunks(sel_mode, nz_source == "measured")
@@ -493,7 +501,7 @@ def main() -> None:
         _MEASURED_NZ_CACHE["dndz"] = measured_nz[1]
 
     # 1. Generate / load mock galaxy catalogs.
-    lon, lat, lon_rand, lat_rand = load_mock_catalogs()
+    lon, lat, lon_rand, lat_rand = load_mock_catalogs(nz_source)
     lon, lat, lon_rand, lat_rand = apply_tile_filter(lon, lat, lon_rand, lat_rand)
     logger.info("Tile-filtered mock catalog sizes: data=%d random=%d", lon.size, lon_rand.size)
 
@@ -504,6 +512,7 @@ def main() -> None:
     theta_theory, w_theory = compute_theory_curve(
         theta_min_arcmin=result.theta_orig.min(),
         theta_max_arcmin=result.theta_orig.max(),
+        nz_source=nz_source,
     )
     from dataclasses import replace
     result = replace(result, theta_theory=theta_theory, w_theory=w_theory)
@@ -516,7 +525,7 @@ def main() -> None:
 
     fits_dir = config.PATHS["sys_preds_dir"]
     os.makedirs(fits_dir, exist_ok=True)
-    fits_path = os.path.join(fits_dir, f"wtheta_density_variation_{_density_cache_tag()}.fits")
+    fits_path = os.path.join(fits_dir, f"wtheta_density_variation_{_density_cache_tag(nz_source)}.fits")
 
     plotting.plot_density_variation_wtheta(result, out_path)
     logger.info("Saved: %s", out_path)

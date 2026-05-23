@@ -1,5 +1,6 @@
 import os
 os.environ["NUMEXPR_MAX_THREADS"] = "128"
+import argparse
 import sys
 import logging
 import numpy as np
@@ -46,12 +47,39 @@ BLENDEMU_DIR = config.BLENDEMU_DIR
 if BLENDEMU_DIR and BLENDEMU_DIR not in sys.path:
     sys.path.append(BLENDEMU_DIR)
 
-# Import external modules after updating sys.path.
+# Import external modules after updating sys.path.  Keep import-time side
+# effects explicit: callers that need these dependencies fail at the call site
+# with a clear message instead of leaving undefined globals behind.
 try:
     from blendemu import nz_utils
+except ImportError as _blendemu_package_error:
+    try:
+        import nz_utils
+    except ImportError as _nz_utils_error:
+        nz_utils = None
+else:
+    _blendemu_package_error = None
+    _nz_utils_error = None
+
+try:
     from cosmic_toolbox import arraytools as at
-except ImportError as e:
-    logger.warning("Could not import some custom modules: %s", e)
+except ImportError as _arraytools_error:
+    at = None
+
+
+def _require_nz_utils():
+    if nz_utils is None:
+        raise ImportError(
+            "Could not import nz_utils. Update BLENDEMU_DIR in src/config.py to the "
+            "directory containing nz_utils.py or to a parent that provides blendemu.nz_utils."
+        ) from _nz_utils_error
+    return nz_utils
+
+
+def _require_arraytools():
+    if at is None:
+        raise ImportError("Could not import cosmic_toolbox.arraytools.") from _arraytools_error
+    return at
 
 # Constants loaded from config.
 SYS_NSIDE_SIM = config.SIM_SETTINGS['sys_nside_sim']
@@ -321,8 +349,9 @@ def load_and_filter_catalog():
     
     Sets the module-level POP_ARCMIN2_FILTERED from the catalog footprint.
     """
+    arraytools = _require_arraytools()
     logger.info("Loading catalog from %s...", GAL_CAT_PATH)
-    gal_cat = at.rec2pd(at.load_hdf(GAL_CAT_PATH))
+    gal_cat = arraytools.rec2pd(arraytools.load_hdf(GAL_CAT_PATH))
     
     # Keep ra/dec temporarily for density calculation.
     keep_cols = ['sersic_n', 'int_mag', 'int_r50_arcsec', 'z', 'e1', 'e2']
@@ -604,6 +633,7 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
     Run chunked simulation and classification with memory-aware filtering.
     """
     import gc
+    legacy_nz_utils = _require_nz_utils()
     maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
     psf_hp_map, noise_hp_map, galactic_hp_map = maps
     
@@ -682,7 +712,7 @@ def simulate_and_classify_chunked(gal_cat, z, edges, output_dir=None):
 
             # Predict only for primaries within the detectability bound.
             if not block_fullset_pred.empty:
-                block_cla_pred = nz_utils.icat2cla_v2(
+                block_cla_pred = legacy_nz_utils.icat2cla_v2(
                     block_fullset_pred,
                     # Keep full neighbor context for feature construction.
                     block_fullset,
@@ -1211,7 +1241,24 @@ def _find_chunk_files(chunk_dir):
     return files
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the SkyVar selection simulation")
+    parser.add_argument(
+        "--selection-mode", dest="selection_mode",
+        choices=("none", "snr", "maglim"), default="none",
+        help="Post-detection galaxy selection (default: none = detection threshold only)",
+    )
+    parser.add_argument(
+        "--load-preds", dest="load_preds", action="store_true", default=False,
+        help="Load existing prediction chunks instead of re-simulating",
+    )
+    return parser
+
+
 def main():
+    args = build_parser().parse_args()
+    sel_mode = None if args.selection_mode == "none" else args.selection_mode
+
     logging.basicConfig(level=getattr(logging, config.SIM_SETTINGS.get('log_level', 'INFO')),
                         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
@@ -1225,14 +1272,7 @@ def main():
 
     maps, SEEN_idx, SEEN_idx_SIM = load_system_maps(return_sim_idx=True)
 
-    # Selection mode from config.
-    sel_mode = config.ANALYSIS_SETTINGS.get('selection_mode', None)
-    if sel_mode is not None:
-        sel_mode = str(sel_mode).strip().lower()
-        if sel_mode in ("", "none"):
-            sel_mode = None
-
-    if config.ANALYSIS_SETTINGS.get('load_preds', True) and _find_chunk_files(PRED_CHUNKS_DIR):
+    if args.load_preds and _find_chunk_files(PRED_CHUNKS_DIR):
         # Streaming load from chunk files (memory-safe).
         chunk_files = _find_chunk_files(PRED_CHUNKS_DIR)
         logger.info("Loading existing prediction chunks (%d files) from %s ...",
@@ -1240,7 +1280,7 @@ def main():
         results = generate_summary_statistics_from_chunks(
             chunk_files, SEEN_idx, SEEN_idx_SIM, output_dir, z, edges, sel_mode)
 
-    elif config.ANALYSIS_SETTINGS.get('load_preds', True) and os.path.exists(OUTPUT_PREDS):
+    elif args.load_preds and os.path.exists(OUTPUT_PREDS):
         # Legacy path: single feather file.
         logger.info("Loading existing predictions from %s...", OUTPUT_PREDS)
         cla_cat = pd.read_feather(OUTPUT_PREDS)
@@ -1267,8 +1307,8 @@ def main():
         temp_dir = os.path.join(os.path.dirname(OUTPUT_PREDS), "temp_chunks")
         try:
             os.rmdir(temp_dir)
-        except OSError:
-            pass
+        except OSError as exc:
+            logger.debug("Did not remove temporary chunk directory %s: %s", temp_dir, exc)
 
         # Compute summary statistics by streaming through chunks (no monolithic concat).
         logger.info("Computing summary statistics from %d prediction chunks...", len(perm_chunk_files))

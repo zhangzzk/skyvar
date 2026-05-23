@@ -283,6 +283,15 @@ class GalacticSystematic(SystematicBase):
         return Ar
 
 
+def systematics_panel_cmaps():
+    """Return simple, standard colormaps for the systematics overview."""
+    return [
+        plt.get_cmap("coolwarm"),
+        plt.get_cmap("PuOr_r"),
+        plt.get_cmap("Blues_r"),
+    ]
+
+
 def main():
     # Create output directories if needed.
     os.makedirs(os.path.join(config.BASE_DIR, "data"), exist_ok=True)
@@ -326,13 +335,22 @@ def main():
 
     # Combined plotting (maps + histograms).
     logger.info("Generating consolidated overview plots...")
+    combined_png = os.path.join(config.BASE_DIR, "output", "sys_combined.png")
+    combined_pdf = os.path.join(config.BASE_DIR, "output", "sys_combined.pdf")
     plt_nz.plot_systematics_overview(
         [pix_sys_psf, pix_sys_noise, pix_sys_galactic],
-        ["PSF FWHM", "Pixel RMS", "Extinction Ar"],
+        ["PSF FWHM [arcsec]", "Pixel RMS", r"Extinction $A_r$ [mag]"],
         nside, mask_footprint,
-        os.path.join("output", "sys_combined.png"),
+        combined_png,
         ra_range=(RA_MIN, RA_MAX), dec_range=(DEC_MIN, DEC_MAX),
-        hist_vlims=[None, None, (0, 0.5)],
+        hist_vlims=[None, None, (0, 0.25)],
+        cmaps=systematics_panel_cmaps(),
+        vcenters=[
+            config.SYSTEMATICS_CONFIG["psf"]["mu0"],
+            config.SYSTEMATICS_CONFIG["noise"]["mu0"],
+            None,
+        ],
+        extra_output_paths=[combined_pdf],
     )
 
 if __name__ == "__main__":

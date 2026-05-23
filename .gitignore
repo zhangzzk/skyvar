@@ -24,11 +24,14 @@ src/config_local.py
 # Working directories (local data, logs, plots, jobs, tests, docs)
 data/
 output/
+bias_variation/output/
+bias_variation/jobs/
 logs/
 final_plots/
 jobs/
 tests/
 docs/
+notebooks/
 
 # OS
 .DS_Store
