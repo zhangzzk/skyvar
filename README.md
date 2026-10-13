@@ -45,6 +45,29 @@ the cached predictions file.
 Outputs land in `${SKYVAR_DATA_DIR}` (predictions, FITS results) and in
 `./output/` (PNG plots). Both are gitignored.
 
+### Harmonic-space (C_ell) enhancement
+
+With `CLUSTERING_SETTINGS['compute_cl'] = True`, `nz_variation` also writes the
+enhanced and unenhanced angular power spectra to `cl_{run_tag}.fits` next to the
+predictions (`ClusteringEnhancement.compute_enhanced_cl_from_maps`, exact
+full-sky mode coupling of the selection and matter spectra).
+
+The coupling needs matter C_ell up to `L + 3*nside_stats - 1` to be exact at
+multipole `L`. With the pipeline default `ell_max = 3000` and nside 256, Delta
+C_ell is exact only up to ell ~ 2230 and too low above that. The standalone
+scripts below raise `ell_max` for their own use; `config.py` is unchanged.
+
+```
+python -B plot_dcl_tomo.py          # Delta C_ell / C_ell for the 6 tomographic bins
+python -B plot_nside_peak_test.py   # peak position vs selection-map resolution
+python tests/test_enhanced_cl.py    # C_ell route vs theta-space model on toy maps
+```
+
+Caveats: the bump near ell ~ 700 sits at the selection-map pixel limit
+(3*nside - 1) and moves with nside, and the plateau above it is not converged
+with resolution. Fine-scale selection-map power is partly per-pixel sampling
+noise from the finite `n_pop_sample`.
+
 
 ## Dependencies
 

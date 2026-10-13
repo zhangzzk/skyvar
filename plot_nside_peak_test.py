@@ -2,6 +2,10 @@
 
 A) Same data: degrade the baseline nside-256 selection maps to 128 and 64.
 B) Independent pipeline pair: sim512_stats256 vs sim512_stats64 (pop100000, tile 2.0).
+   Rough cross-check only: both runs date from 2026-02-16/17, before the Feb 18 and
+   Feb 23 simulation changes, and run tags do not record all settings.
+
+Run from the repo root on a compute node:  python -B plot_nside_peak_test.py [out_dir, default output/]
 """
 import os
 import sys
@@ -18,7 +22,7 @@ from astropy.io import fits
 from src import config
 from src.clustering import ClusteringEnhancement, build_pyccl_cosmology
 
-out_dir = sys.argv[1]
+out_dir = sys.argv[1] if len(sys.argv) > 1 else "output"
 os.makedirs(out_dir, exist_ok=True)
 PRED = config.PATHS["sys_preds_dir"]
 BASE = os.path.join(PRED, "sys_nz_sim1024_stats256_pop50000_tile1.0")
@@ -56,7 +60,8 @@ def ratio(stats, nside):
     res = ce.compute_enhanced_cl_from_maps(
         n_maps=stats["dndzs"].T, nbar=stats["dndz_det"], z=stats["z"], seen_idx=stats["SEEN_idx"],
         nside=nside, auto_only=cs.get("auto_only", False), lmax_out=L_PLOT)
-    return res.delta_cl / res.cl_model
+    with np.errstate(divide="ignore", invalid="ignore"):  # cl_model is 0 below ell_min
+        return res.delta_cl / res.cl_model
 
 
 def peak_ell(r):

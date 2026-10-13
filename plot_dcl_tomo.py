@@ -1,4 +1,7 @@
-"""Delta C_ell / C_ell vs ell for the 6 tomographic bins, one panel.  Run on a compute node:  python -B plot_dcl_tomo.py output/"""
+"""Delta C_ell / C_ell vs ell for the 6 tomographic bins, one panel.
+
+Run from the repo root on a compute node:  python -B plot_dcl_tomo.py [out_dir, default output/]
+"""
 import os
 import sys
 
@@ -13,7 +16,7 @@ from src import config
 from src import selection as sel
 from src.clustering import ClusteringEnhancement, build_pyccl_cosmology
 
-out_dir = sys.argv[1]
+out_dir = sys.argv[1] if len(sys.argv) > 1 else "output"
 os.makedirs(out_dir, exist_ok=True)
 
 cs = config.CLUSTERING_SETTINGS
@@ -32,7 +35,8 @@ for i in range(len(edges) - 1):
         n_maps=stats["dndzs"].T, nbar=nbar, z=stats["z"], seen_idx=stats["SEEN_idx"],
         nside=nside, auto_only=cs.get("auto_only", False), lmax_out=L_PLOT,
     )
-    ratios[i] = res.delta_cl / res.cl_model
+    with np.errstate(divide="ignore", invalid="ignore"):  # cl_model is 0 below ell_min
+        ratios[i] = res.delta_cl / res.cl_model
     print(f"bin {i}: dCl/Cl at ell=10,100,1000,3000 =", ratios[i][[10, 100, 1000, 3000]].round(4), flush=True)
 
 ell = np.arange(L_PLOT + 1)
