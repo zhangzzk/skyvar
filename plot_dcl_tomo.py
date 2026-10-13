@@ -19,7 +19,7 @@ os.makedirs(out_dir, exist_ok=True)
 cs = config.CLUSTERING_SETTINGS
 nside = config.SIM_SETTINGS["sys_nside_stats"]
 edges = config.ANALYSIS_SETTINGS["tomo_bin_edges"]
-L_PLOT = 3000
+L_MIN, L_PLOT = 10, 3000
 # Matter C_ell to L_PLOT + lmax_sel so every plotted ell gets its full coupling window.
 ELL_MAX_MATTER = L_PLOT + 3 * nside - 1
 
@@ -40,26 +40,22 @@ np.savez(os.path.join(out_dir, "dcl_over_cl_tomo.npz"), ell=ell, edges=np.asarra
          **{f"bin{i}": r for i, r in ratios.items()})
 
 colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
-ink, muted, grid = "#2b2b29", "#6b6a64", "#e4e3de"
+ink, muted = "#2b2b29", "#6b6a64"
 plt.rcParams.update({"font.size": 11, "axes.edgecolor": muted, "axes.labelcolor": ink,
                      "xtick.color": muted, "ytick.color": muted})
 
 fig, ax = plt.subplots(figsize=(7.0, 4.4))
-sl = slice(cs["ell_min"], L_PLOT + 1)
+sl = slice(L_MIN, L_PLOT + 1)
 for i, r in ratios.items():
-    ax.plot(ell[sl], r[sl], color=colors[i], lw=2, label=f"{edges[i]:.2f} – {edges[i + 1]:.2f}")
+    ax.plot(ell[sl], r[sl], color=colors[i], lw=2, label=f"bin {i + 1}")
 ax.axhline(0, color=muted, lw=1, zorder=0)
 ax.set_xscale("log")
-ax.set_xlim(cs["ell_min"], L_PLOT)
+ax.set_xlim(L_MIN, L_PLOT)
 ax.set_xlabel(r"$\ell$")
 ax.set_ylabel(r"$\Delta C_\ell \,/\, C_\ell$")
-ax.set_title("Clustering enhancement from spatially varying selection", color=ink, fontsize=12, loc="left")
-ax.grid(True, which="major", color=grid, lw=0.8)
 for s in ("top", "right"):
     ax.spines[s].set_visible(False)
-leg = ax.legend(title=r"tomographic bin ($z_{\rm phot}$)", frameon=False, fontsize=9.5, title_fontsize=9.5,
-                loc="upper left", bbox_to_anchor=(0.2, 1.0), labelcolor=ink)
-leg.get_title().set_color(ink)
+ax.legend(frameon=False, fontsize=9.5, loc="upper left", labelcolor=ink)
 fig.tight_layout()
 for ext in ("png", "pdf"):
     fig.savefig(os.path.join(out_dir, f"dcl_over_cl_tomo.{ext}"), dpi=200)
