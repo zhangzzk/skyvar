@@ -45,22 +45,24 @@ np.savez(os.path.join(out_dir, "dcl_over_cl_tomo.npz"), ell=ell, edges=np.asarra
 
 colors = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300"]
 ink, muted = "#2b2b29", "#6b6a64"
-plt.rcParams.update({"font.size": 11, "axes.edgecolor": muted, "axes.labelcolor": ink,
+# Sized for one A&A column (88 mm) so fonts appear at their nominal size.
+plt.rcParams.update({"font.size": 9, "axes.edgecolor": muted, "axes.labelcolor": ink,
                      "xtick.color": muted, "ytick.color": muted})
 
-fig, ax = plt.subplots(figsize=(7.0, 4.4))
+fig, ax = plt.subplots(figsize=(3.5, 2.6))
 sl = slice(L_MIN, L_PLOT + 1)
 for i, r in ratios.items():
-    ax.plot(ell[sl], r[sl], color=colors[i], lw=2, label=f"bin {i + 1}")
-ax.axhline(0, color=muted, lw=1, zorder=0)
+    ax.plot(ell[sl], r[sl], color=colors[i], lw=1.4, label=f"bin {i + 1}")
+ax.axhline(0, color=muted, lw=0.8, zorder=0)
 ax.set_xscale("log")
 ax.set_xlim(L_MIN, L_PLOT)
 ax.set_xlabel(r"$\ell$")
 ax.set_ylabel(r"$\Delta C_\ell \,/\, C_\ell$")
 for s in ("top", "right"):
     ax.spines[s].set_visible(False)
-ax.legend(frameon=False, fontsize=9.5, loc="upper left", labelcolor=ink)
-fig.tight_layout()
+ax.legend(frameon=False, fontsize=8, loc="upper left", ncol=2, columnspacing=1.0, handlelength=1.5,
+          labelcolor=ink)
+fig.tight_layout(pad=0.3)
 for ext in ("png", "pdf"):
-    fig.savefig(os.path.join(out_dir, f"dcl_over_cl_tomo.{ext}"), dpi=200)
+    fig.savefig(os.path.join(out_dir, f"dcl_over_cl_tomo.{ext}"), dpi=300)
 print("saved", out_dir)
