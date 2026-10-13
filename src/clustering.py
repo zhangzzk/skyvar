@@ -88,8 +88,8 @@ def compute_theory_wtheta_from_dndz(
 @dataclass(frozen=True)
 class EnhancementResult:
     delta_w: np.ndarray
-    delta_w_1: np.ndarray  # Contribution from term1 + term1_2
-    delta_w_2: np.ndarray  # Contribution from term2
+    delta_w_1: np.ndarray  # Linear mean-shift contribution.
+    delta_w_2: np.ndarray  # Mean-product plus centered angular-covariance contribution.
     w_model: np.ndarray
     w_true: np.ndarray
     w_selection: Optional[np.ndarray]
@@ -162,7 +162,7 @@ class ClusteringEnhancement:
         seen_idx: np.ndarray,
         auto_only: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute the selection correlation matrix delta_w_nz[i, j]."""
+        """Compute mean-shift and angular-covariance selection corrections."""
         n_maps = np.asarray(n_maps, dtype=float)
         nbar = np.asarray(nbar, dtype=float)
         nz = n_maps.shape[0]
@@ -174,28 +174,30 @@ class ClusteringEnhancement:
 
         delta_w_nz_1 = np.zeros((nz, nz))
         delta_w_nz_2 = np.zeros((nz, nz, len(theta_rad)))
-        # Mean over pixels for each bin.
+        # Mean over footprint pixels for each bin.  Keep this contribution
+        # analytic so a constant footprint offset is not mixed with mask power.
         local_means = np.mean(n_maps, axis=1)
+        mean_delta = local_means - nbar
 
-        # Precompute spherical-harmonic coefficients for speed.
+        # Precompute spherical-harmonic coefficients of the centered maps.
         alms = []
         for i in range(nz):
             full_delta_map_i = np.zeros(npix)
-            full_delta_map_i[seen_idx] = n_maps[i] - nbar[i]
+            full_delta_map_i[seen_idx] = n_maps[i] - local_means[i]
             alms.append(hp.map2alm(full_delta_map_i, lmax=lmax))
 
         for i in range(nz):
             j_range = [i] if auto_only else range(i, nz)
             for j in j_range:
-                term1 = nbar[i] * (local_means[i] - nbar[i])
-                term1_2 = nbar[j] * (local_means[j] - nbar[j])
-                val1 = term1 + term1_2
+                val1 = nbar[i] * mean_delta[j] + nbar[j] * mean_delta[i]
+                mean_product = mean_delta[i] * mean_delta[j]
 
                 cl_ij = hp.alm2cl(alms[i], alms[j])
                 if fsky > 0:
                     cl_ij /= fsky
 
-                val2 = self._cl_to_wtheta_fullsky(cl_ij, theta_rad, min(self.ell_min, lmax))
+                centered_wtheta = self._cl_to_wtheta_fullsky(cl_ij, theta_rad, min(self.ell_min, lmax))
+                val2 = centered_wtheta + mean_product
 
                 delta_w_nz_1[i, j] = val1
                 delta_w_nz_2[i, j] = val2
