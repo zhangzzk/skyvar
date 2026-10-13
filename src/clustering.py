@@ -101,6 +101,83 @@ class EnhancementResult:
     dz: np.ndarray
 
 
+@dataclass(frozen=True)
+class EnhancedClResult:
+    ell: np.ndarray
+    cl_model: np.ndarray  # Unenhanced C_ell of the global n(z).
+    cl_true: np.ndarray  # cl_model + delta_cl.
+    delta_cl: np.ndarray
+    delta_cl_1: np.ndarray  # Linear mean-shift contribution.
+    delta_cl_2: np.ndarray  # Mean-product plus mode-coupled angular-covariance contribution.
+    nbar: np.ndarray
+    z_mid: np.ndarray
+    dz: np.ndarray
+
+
+_COUPLING_KERNEL = None
+
+
+def _get_coupling_kernel():
+    """Compile the Wigner-3j coupling loop on first use (numba is only needed here)."""
+    global _COUPLING_KERNEL
+    if _COUPLING_KERNEL is None:
+        from numba import njit, prange
+
+        @njit(parallel=True)
+        def kernel(x, lnfact, lmax_out):
+            l1max = x.shape[0] - 1
+            l2max = x.shape[1] - 1
+            out = np.zeros(lmax_out + 1)
+            for L in prange(lmax_out + 1):
+                acc = 0.0
+                for l1 in range(l1max + 1):
+                    # |L - l1| always has the parity that makes l1 + l2 + L even.
+                    for l2 in range(abs(L - l1), min(L + l1, l2max) + 1, 2):
+                        J = l1 + l2 + L
+                        g = J // 2
+                        ln_w3j_sq = (
+                            lnfact[J - 2 * l1] + lnfact[J - 2 * l2] + lnfact[J - 2 * L] - lnfact[J + 1]
+                            + 2.0 * (lnfact[g] - lnfact[g - l1] - lnfact[g - l2] - lnfact[g - L])
+                        )
+                        acc += (2 * l1 + 1) * (2 * l2 + 1) * np.exp(ln_w3j_sq) * x[l1, l2]
+                out[L] = acc / (4.0 * np.pi)
+            return out
+
+        _COUPLING_KERNEL = kernel
+    return _COUPLING_KERNEL
+
+
+def couple_cl_products(x: np.ndarray, lmax_out: int) -> np.ndarray:
+    """
+    Harmonic transform of a sum of products of correlation functions.
+
+    For w(theta) = sum_p w_A^p(theta) * w_B^p(theta), with each factor written as
+    w(theta) = sum_ell (2 ell + 1) / (4 pi) * C_ell * P_ell(cos theta), the exact
+    full-sky power spectrum of w is
+
+      C_L = sum_{l1, l2} (2 l1 + 1)(2 l2 + 1) / (4 pi) * (l1 l2 L; 0 0 0)^2 * x[l1, l2]
+
+    with x[l1, l2] = sum_p C_A^p(l1) * C_B^p(l2).  Summing the products over p
+    before calling this keeps the expensive 3j loop to a single pass.
+    """
+    from scipy.special import gammaln
+
+    x = np.ascontiguousarray(x, dtype=float)
+    lmax_out = int(lmax_out)
+    n_fact = (x.shape[0] - 1) + (x.shape[1] - 1) + lmax_out + 2
+    lnfact = gammaln(np.arange(n_fact, dtype=float) + 1.0)
+    return _get_coupling_kernel()(x, lnfact, lmax_out)
+
+
+def _pad_ell(cl: np.ndarray, lmax: int) -> np.ndarray:
+    """Truncate or zero-pad the last (ell) axis to lmax + 1 entries."""
+    n = lmax + 1
+    if cl.shape[-1] >= n:
+        return cl[..., :n]
+    pad = [(0, 0)] * (cl.ndim - 1) + [(0, n - cl.shape[-1])]
+    return np.pad(cl, pad)
+
+
 class ClusteringEnhancement:
     """
     Compute clustering enhancement driven by spatial variation in n(z, theta).
@@ -129,6 +206,7 @@ class ClusteringEnhancement:
         if self.ell_min < 0 or self.ell_min >= self.ell_max:
             raise ValueError("Require 0 <= ell_min < ell_max.")
         self._cache_w_mat = {}
+        self._cache_cl_mat = {}
 
     @staticmethod
     def _ccl_correlation_compat(
@@ -153,27 +231,32 @@ class ClusteringEnhancement:
         x = np.cos(theta_rad)
         return legval(x, coeff)
 
-    def selection_wtheta_from_map(
+    def selection_cls_from_map(
         self,
         n_maps: np.ndarray,
         nbar: np.ndarray,
-        theta_deg: np.ndarray,
         nside: int,
         seen_idx: np.ndarray,
         auto_only: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute mean-shift and angular-covariance selection corrections."""
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Harmonic-space pieces of the selection correction.
+
+        Returns (mean_shift[i, j], mean_product[i, j], cl_sel[i, j, ell]), where
+        cl_sel is the fsky-corrected cross-spectrum of the centered maps for
+        ell = 0..min(ell_max, 3 nside - 1), without the ell_min cut.
+        """
         n_maps = np.asarray(n_maps, dtype=float)
         nbar = np.asarray(nbar, dtype=float)
         nz = n_maps.shape[0]
         npix = hp.nside2npix(nside)
-        theta_rad = np.deg2rad(theta_deg)
         lmax_map = 3 * nside - 1
         lmax = min(self.ell_max, lmax_map)
         fsky = len(seen_idx) / npix if npix > 0 else 0
 
-        delta_w_nz_1 = np.zeros((nz, nz))
-        delta_w_nz_2 = np.zeros((nz, nz, len(theta_rad)))
+        mean_shift = np.zeros((nz, nz))
+        mean_product = np.zeros((nz, nz))
+        cl_sel = np.zeros((nz, nz, lmax + 1))
         # Mean over footprint pixels for each bin.  Keep this contribution
         # analytic so a constant footprint offset is not mixed with mask power.
         local_means = np.mean(n_maps, axis=1)
@@ -189,23 +272,47 @@ class ClusteringEnhancement:
         for i in range(nz):
             j_range = [i] if auto_only else range(i, nz)
             for j in j_range:
-                val1 = nbar[i] * mean_delta[j] + nbar[j] * mean_delta[i]
-                mean_product = mean_delta[i] * mean_delta[j]
-
                 cl_ij = hp.alm2cl(alms[i], alms[j])
                 if fsky > 0:
                     cl_ij /= fsky
 
-                centered_wtheta = self._cl_to_wtheta_fullsky(cl_ij, theta_rad, min(self.ell_min, lmax))
-                val2 = centered_wtheta + mean_product
-
-                delta_w_nz_1[i, j] = val1
-                delta_w_nz_2[i, j] = val2
+                mean_shift[i, j] = nbar[i] * mean_delta[j] + nbar[j] * mean_delta[i]
+                mean_product[i, j] = mean_delta[i] * mean_delta[j]
+                cl_sel[i, j] = cl_ij
                 if not auto_only and i != j:
-                    delta_w_nz_1[j, i] = val1
-                    delta_w_nz_2[j, i] = val2
+                    mean_shift[j, i] = mean_shift[i, j]
+                    mean_product[j, i] = mean_product[i, j]
+                    cl_sel[j, i] = cl_ij
 
-        return delta_w_nz_1, delta_w_nz_2
+        return mean_shift, mean_product, cl_sel
+
+    def selection_wtheta_from_map(
+        self,
+        n_maps: np.ndarray,
+        nbar: np.ndarray,
+        theta_deg: np.ndarray,
+        nside: int,
+        seen_idx: np.ndarray,
+        auto_only: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute mean-shift and angular-covariance selection corrections."""
+        theta_rad = np.deg2rad(theta_deg)
+        mean_shift, mean_product, cl_sel = self.selection_cls_from_map(
+            n_maps, nbar, nside=nside, seen_idx=seen_idx, auto_only=auto_only
+        )
+        nz = cl_sel.shape[0]
+        lmax = cl_sel.shape[-1] - 1
+
+        delta_w_nz_2 = np.zeros((nz, nz, len(theta_rad)))
+        for i in range(nz):
+            j_range = [i] if auto_only else range(i, nz)
+            for j in j_range:
+                centered_wtheta = self._cl_to_wtheta_fullsky(cl_sel[i, j], theta_rad, min(self.ell_min, lmax))
+                delta_w_nz_2[i, j] = centered_wtheta + mean_product[i, j]
+                if not auto_only and i != j:
+                    delta_w_nz_2[j, i] = delta_w_nz_2[i, j]
+
+        return mean_shift, delta_w_nz_2
 
     def _get_bin_tracer(self, z_support, z_lo, z_hi, dz, bias=None):
         W = np.zeros_like(z_support)
@@ -224,18 +331,9 @@ class ClusteringEnhancement:
             bias=(z_support, b),
         )
 
-    def matter_correlation_matrix(
-        self,
-        z: np.ndarray,
-        theta_deg: np.ndarray,
-        bias: Optional[np.ndarray] = None,
-        nz: Optional[int] = None,
-        auto_only: bool = False,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Compute the full [Nz, Nz, Ntheta] matter-correlation matrix."""
-        z = np.asarray(z, dtype=float)
-        theta_deg = np.asarray(theta_deg, dtype=float)
-
+    @staticmethod
+    def _z_edges(z: np.ndarray, nz: Optional[int]) -> Tuple[np.ndarray, np.ndarray]:
+        """Return (z_edges, z_mid) from bin centers (len nz) or edges (len nz + 1)."""
         if len(z) == nz:
             dz_val = np.diff(z)
             z_edges = np.zeros(nz + 1)
@@ -252,17 +350,30 @@ class ClusteringEnhancement:
             z_mid = 0.5 * (z_edges[:-1] + z_edges[1:])
         else:
             raise ValueError(f"Redshift array length {len(z)} must be {nz} or {nz+1}")
+        return z_edges, z_mid
 
+    def matter_cl_matrix(
+        self,
+        z: np.ndarray,
+        bias: Optional[np.ndarray] = None,
+        nz: Optional[int] = None,
+        auto_only: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute the full [Nz, Nz, ell_max + 1] shell C_ell matrix (ell < ell_min zeroed)."""
+        z = np.asarray(z, dtype=float)
+        z_edges, z_mid = self._z_edges(z, nz)
         dz_bins = np.diff(z_edges)
         nz_bins = len(dz_bins)
-        
-        cache_key = (tuple(z_edges.tolist()), tuple(theta_deg.tolist()), auto_only)
-        if cache_key in self._cache_w_mat:
-            return self._cache_w_mat[cache_key], z_mid, dz_bins
 
-        logger.info("Computing %dx%d shell correlations (CCL matrix)...", nz_bins, nz_bins)
-        w_mat = np.zeros((nz_bins, nz_bins, len(theta_deg)), dtype=float)
-        
+        bias_key = None if bias is None else np.asarray(bias, dtype=float).tobytes()
+        cache_key = (tuple(z_edges.tolist()), bias_key, auto_only)
+        if cache_key in self._cache_cl_mat:
+            return self._cache_cl_mat[cache_key], z_mid, dz_bins
+
+        logger.info("Computing %dx%d shell power spectra (CCL matrix)...", nz_bins, nz_bins)
+        ell = np.arange(self.ell_max + 1, dtype=int)
+        cl_mat = np.zeros((nz_bins, nz_bins, len(ell)), dtype=float)
+
         zmin, zmax = float(z_edges[0]), float(z_edges[-1])
         z_s = np.linspace(zmin, zmax, 10000, dtype=float)
 
@@ -272,19 +383,51 @@ class ClusteringEnhancement:
         ]
 
         # Full cross-correlation is expensive; optimize later if needed.
-        ell = np.arange(self.ell_max + 1, dtype=int)
         for i in range(nz_bins):
             j_range = [i] if auto_only else range(i, nz_bins)
             for j in j_range:
                 cls = ccl.angular_cl(self.cosmo, tracers[i], tracers[j], ell)
                 if self.ell_min > 0:
                     cls[: self.ell_min] = 0.0
-                
-                w_ij = self._ccl_correlation_compat(self.cosmo, ell, cls, theta_deg)
+                cl_mat[i, j, :] = cls
+                if not auto_only and i != j:
+                    cl_mat[j, i, :] = cls
+
+        self._cache_cl_mat[cache_key] = cl_mat
+        return cl_mat, z_mid, dz_bins
+
+    def matter_correlation_matrix(
+        self,
+        z: np.ndarray,
+        theta_deg: np.ndarray,
+        bias: Optional[np.ndarray] = None,
+        nz: Optional[int] = None,
+        auto_only: bool = False,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Compute the full [Nz, Nz, Ntheta] matter-correlation matrix."""
+        z = np.asarray(z, dtype=float)
+        theta_deg = np.asarray(theta_deg, dtype=float)
+        z_edges, z_mid = self._z_edges(z, nz)
+        dz_bins = np.diff(z_edges)
+        nz_bins = len(dz_bins)
+
+        cache_key = (tuple(z_edges.tolist()), tuple(theta_deg.tolist()), auto_only)
+        if cache_key in self._cache_w_mat:
+            return self._cache_w_mat[cache_key], z_mid, dz_bins
+
+        cl_mat, _, _ = self.matter_cl_matrix(z, bias=bias, nz=nz, auto_only=auto_only)
+
+        logger.info("Computing %dx%d shell correlations (CCL matrix)...", nz_bins, nz_bins)
+        w_mat = np.zeros((nz_bins, nz_bins, len(theta_deg)), dtype=float)
+        ell = np.arange(self.ell_max + 1, dtype=int)
+        for i in range(nz_bins):
+            j_range = [i] if auto_only else range(i, nz_bins)
+            for j in j_range:
+                w_ij = self._ccl_correlation_compat(self.cosmo, ell, cl_mat[i, j], theta_deg)
                 w_mat[i, j, :] = w_ij
                 if not auto_only and i != j:
                     w_mat[j, i, :] = w_ij
-        
+
         self._cache_w_mat[cache_key] = w_mat
         return w_mat, z_mid, dz_bins
 
@@ -374,5 +517,111 @@ class ClusteringEnhancement:
             nbar=nbar,
             z_mid=z_mid,
             theta_deg=theta_deg,
+            dz=dz,
+        )
+
+    def compute_enhanced_cl_from_maps(
+        self,
+        n_maps: np.ndarray,
+        nbar: np.ndarray,
+        z: np.ndarray,
+        bias: Optional[np.ndarray] = None,
+        auto_only: bool = False,
+        nside: Optional[int] = None,
+        seen_idx: Optional[np.ndarray] = None,
+        lmax_out: Optional[int] = None,
+    ) -> EnhancedClResult:
+        """
+        Harmonic-space counterpart of ``compute_enhancement_from_maps``.
+
+        The theta-space model is delta_w(theta) = sum_ij S_ij(theta) * w_mat_ij(theta).
+        Constant pieces of S (mean shift, mean product) only rescale the matter
+        C_ell.  The centered selection covariance multiplies w_mat at each theta,
+        which in harmonic space is a Wigner-3j mode coupling; the selection and
+        matter spectra are summed over (i, j) pairs first (X = S^T M), so the
+        coupling sum runs once.  Uses the exact full-sky Legendre convention.
+
+        The product is band-limited to ell_max + lmax_sel (lmax_sel = min(ell_max,
+        3 nside - 1)), which is the default lmax_out; with it, the Legendre
+        transform of cl_true reproduces the full-sky theta-space model exactly.
+        Cutting lower (e.g. at ell_max) drops real power and rings at large theta.
+        Above ell_max - lmax_sel, delta_cl misses coupling from matter power
+        beyond ell_max, and cl_model is zero above ell_max.
+        """
+        n_maps = np.asarray(n_maps, dtype=float)
+        nbar = np.asarray(nbar, dtype=float)
+        z = np.asarray(z, dtype=float)
+
+        if n_maps.ndim != 2:
+            raise ValueError("n_maps must be 2D with shape (nz, npix).")
+        nz, npix = n_maps.shape
+        if nbar.shape != (nz,):
+            raise ValueError("nbar must have shape (nz,).")
+
+        if nside is None:
+            if seen_idx is None:
+                nside = hp.npix2nside(npix)
+            else:
+                raise ValueError("nside must be provided if seen_idx is used.")
+
+        cl_mat, z_mid, dz = self.matter_cl_matrix(z, bias=bias, nz=nz, auto_only=auto_only)
+        mean_shift, mean_product, cl_sel = self.selection_cls_from_map(
+            n_maps, nbar, nside=nside, seen_idx=seen_idx, auto_only=auto_only
+        )
+        lmax_sel = cl_sel.shape[-1] - 1
+        # Same low-ell cut as the theta-space selection term.
+        cl_sel[..., : min(self.ell_min, lmax_sel)] = 0.0
+
+        if lmax_out is None:
+            lmax_out = self.ell_max + lmax_sel
+        lmax_out = int(lmax_out)
+        if lmax_out > self.ell_max + lmax_sel:
+            raise ValueError(
+                f"lmax_out={lmax_out} exceeds the band limit ell_max + lmax_sel = {self.ell_max + lmax_sel}."
+            )
+
+        dz_matrix = dz[:, None] * dz[None, :]
+
+        weights = nbar * dz
+        norm = np.sum(weights)
+        if norm > 0:
+            cl_model = np.einsum("i,j,ijl->l", weights, weights, cl_mat) / (norm**2)
+        else:
+            cl_model = np.zeros(cl_mat.shape[-1])
+
+        delta_cl_1 = np.einsum("ij,ijl->l", mean_shift * dz_matrix, cl_mat)
+
+        # Pair-summed (ell1, ell2) table: X = sum_ij dz_i dz_j C_sel_ij(ell1) C_mat_ij(ell2).
+        if auto_only:
+            ii = np.arange(nz)
+            sel_pairs = cl_sel[ii, ii] * (dz**2)[:, None]
+            mat_pairs = cl_mat[ii, ii]
+        else:
+            sel_pairs = (cl_sel * dz_matrix[:, :, None]).reshape(nz * nz, -1)
+            mat_pairs = cl_mat.reshape(nz * nz, -1)
+        x = sel_pairs.T @ mat_pairs
+
+        logger.info(
+            "Coupling selection x matter spectra (lmax_sel=%d, ell_max=%d, lmax_out=%d)...",
+            lmax_sel, self.ell_max, lmax_out,
+        )
+        delta_cl_2 = (
+            _pad_ell(np.einsum("ij,ijl->l", mean_product * dz_matrix, cl_mat), lmax_out)
+            + couple_cl_products(x, lmax_out)
+        )
+
+        cl_model = _pad_ell(cl_model, lmax_out)
+        delta_cl_1 = _pad_ell(delta_cl_1, lmax_out)
+        delta_cl = delta_cl_1 + delta_cl_2
+
+        return EnhancedClResult(
+            ell=np.arange(lmax_out + 1),
+            cl_model=cl_model,
+            cl_true=cl_model + delta_cl,
+            delta_cl=delta_cl,
+            delta_cl_1=delta_cl_1,
+            delta_cl_2=delta_cl_2,
+            nbar=nbar,
+            z_mid=z_mid,
             dz=dz,
         )

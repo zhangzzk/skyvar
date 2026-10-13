@@ -154,6 +154,8 @@ CLUSTERING_SETTINGS = {
 
     "auto_only": True,
     "flat_global": False,
+    # Also compute the harmonic-space (C_ell) enhancement in nz_variation.
+    "compute_cl": True,
 
     "nbins": 20,
     "min_sep_arcmin": 5.0,

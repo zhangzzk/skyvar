@@ -5,6 +5,7 @@ matplotlib
 healpy
 astropy
 pyccl
+numba
 treecorr
 xgboost
 joblib

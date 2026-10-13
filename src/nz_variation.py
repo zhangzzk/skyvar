@@ -42,6 +42,23 @@ def save_clustering_results_to_fits(all_clustering_results, output_path):
     logger.info("Saved w_theta curves to %s", output_path)
 
 
+def save_cl_results_to_fits(all_cl_results, output_path):
+    """Save ell, cl_model, cl_true, and delta_cl terms for each bin to a multi-HDU FITS file."""
+    hdus = [fits.PrimaryHDU()]
+
+    for key, res in all_cl_results.items():
+        ext = key.upper()[:40]
+        hdus.append(fits.ImageHDU(np.asarray(res.ell, dtype=np.float64), name=f"{ext}_ELL"))
+        hdus.append(fits.ImageHDU(np.asarray(res.cl_model, dtype=np.float64), name=f"{ext}_CLMODEL"))
+        hdus.append(fits.ImageHDU(np.asarray(res.cl_true, dtype=np.float64), name=f"{ext}_CLTRUE"))
+        hdus.append(fits.ImageHDU(np.asarray(res.delta_cl, dtype=np.float64), name=f"{ext}_DCL_TOT"))
+        hdus.append(fits.ImageHDU(np.asarray(res.delta_cl_1, dtype=np.float64), name=f"{ext}_DCL_TERM1"))
+        hdus.append(fits.ImageHDU(np.asarray(res.delta_cl_2, dtype=np.float64), name=f"{ext}_DCL_TERM2"))
+
+    fits.HDUList(hdus).writeto(output_path, overwrite=True)
+    logger.info("Saved C_ell spectra to %s", output_path)
+
+
 
 
 def main():
@@ -50,6 +67,7 @@ def main():
 
     output_dir = 'output/'
     w_theta_path = utils.get_output_path("w_theta_fits")
+    cl_path = utils.get_output_path("cl_fits")
     os.makedirs(output_dir, exist_ok=True)
 
     # 1. Load Pre-calculated Statistics from FITS
@@ -88,7 +106,9 @@ def main():
     )
 
     all_clustering_results = {}
+    all_cl_results = {}
     all_geo_factors = {}
+    compute_cl = config.CLUSTERING_SETTINGS.get('compute_cl', False)
 
     nbar_label = 'flat' if config.CLUSTERING_SETTINGS.get('flat_global', False) else 'det'
     auto_label = 'auto' if config.CLUSTERING_SETTINGS.get('auto_only', False) else 'full'
@@ -127,11 +147,23 @@ def main():
         clustering_enh_factor = res.w_true[0] / res.w_model[0]
         logger.info("[%10s] Geometric: %.6f, Clustering (theta_min): %.6f", key, geo_enh, clustering_enh_factor)
 
+        if compute_cl:
+            all_cl_results[key] = ce.compute_enhanced_cl_from_maps(
+                n_maps=n_maps,
+                nbar=nbar,
+                z=stats['z'],
+                seen_idx=stats['SEEN_idx'],
+                nside=config.SIM_SETTINGS['sys_nside_stats'],
+                auto_only=config.CLUSTERING_SETTINGS.get('auto_only', False)
+            )
+
     # 3. Consolidated Plotting
     plt_nz.plot_all_comparisons(all_clustering_results, all_geo_factors, output_dir)
     plt_nz.plot_all_delta_w_components(all_clustering_results, output_dir)
     plt_nz.plot_model_diagnostics(all_clustering_results, results_stats, output_dir)
     save_clustering_results_to_fits(all_clustering_results, w_theta_path)
+    if compute_cl:
+        save_cl_results_to_fits(all_cl_results, cl_path)
 
 
 if __name__ == "__main__":

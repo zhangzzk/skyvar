@@ -34,6 +34,8 @@ def get_output_path(kind, bin_idx=None):
         return os.path.join(config.PATHS['sys_preds_dir'], f"pred_chunks_{run_tag_pred}")
     if kind == "w_theta_fits":
         return os.path.join(config.PATHS['sys_preds_dir'], f"w_theta_{run_tag}.fits")
+    if kind == "cl_fits":
+        return os.path.join(config.PATHS['sys_preds_dir'], f"cl_{run_tag}.fits")
     if kind == "nz_bin_fits":
         if bin_idx is None:
             raise ValueError("bin_idx is required for kind='nz_bin_fits'")
