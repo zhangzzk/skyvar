@@ -22,7 +22,7 @@ os.makedirs(out_dir, exist_ok=True)
 cs = config.CLUSTERING_SETTINGS
 nside = config.SIM_SETTINGS["sys_nside_stats"]
 edges = config.ANALYSIS_SETTINGS["tomo_bin_edges"]
-L_MIN, L_PLOT = 10, 3000
+L_MIN, L_PLOT = 20, 3000
 # Matter C_ell to L_PLOT + lmax_sel so every plotted ell gets its full coupling window.
 ELL_MAX_MATTER = L_PLOT + 3 * nside - 1
 
